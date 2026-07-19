@@ -21,6 +21,7 @@ on:
 
 env:
   NODE_VERSION: "20"
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app_db
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository }}
 
