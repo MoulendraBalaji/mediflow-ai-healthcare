@@ -13,7 +13,7 @@ RUN npm ci --workspace=api
 COPY prisma ./prisma
 COPY api ./api
 
-RUN cd api && npx prisma generate
+RUN cd api && npx prisma generate --schema ../prisma/schema.prisma
 RUN cd api && npx tsc
 
 # ============================================================

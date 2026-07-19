@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET: string = process.env.JWT_SECRET || '';
 if (!JWT_SECRET) {
   console.error('FATAL: JWT_SECRET environment variable is not set');
   process.exit(1);
@@ -24,9 +24,9 @@ export function generateToken(userId: string, email: string, role: string): stri
   );
 }
 
-export function verifyToken(token: string): any {
+export function verifyToken(token: string): jwt.JwtPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
   } catch (error) {
     return null;
   }

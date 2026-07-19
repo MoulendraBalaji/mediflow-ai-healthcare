@@ -51,7 +51,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Run Prisma Migrations
-        run: npx prisma migrate deploy
+        run: npx prisma migrate deploy --schema ../prisma/schema.prisma
         working-directory: api
       - name: Run Tests
         run: npm test --workspaces --if-present
