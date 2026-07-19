@@ -1,0 +1,25 @@
+{
+  "name": "mediflow",
+  "version": "1.0.0",
+  "description": "AI Healthcare Navigation & Patient Care Coordination Platform",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"cd api && npm run dev\" \"cd app && npm run dev\"",
+    "build": "npm run build --workspace=api && npm run build --workspace=app",
+    "start": "npm start --workspace=app",
+    "db:push": "cd api && npx prisma db push",
+    "db:seed": "cd api && npx prisma db seed",
+    "db:reset": "cd api && npx prisma migrate reset --force",
+    "db:studio": "cd api && npx prisma studio"
+  },
+  "workspaces": [
+    "api",
+    "app"
+  ],
+  "dependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

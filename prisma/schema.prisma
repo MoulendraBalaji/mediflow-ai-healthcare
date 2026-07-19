@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String    @id @default(cuid())
+  email      String    @unique
+  password   String
+  name       String
+  role       String    @default("PATIENT")
+  patientId  String?   @unique
+  providerId String?   @unique
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  patient   Patient?   @relation("UserPatient", fields: [patientId], references: [id])
+  provider  Provider?  @relation("UserProvider", fields: [providerId], references: [id])
+
+  @@index([email])
+  @@index([patientId])
+  @@index([providerId])
+}
+
+model Patient {
+  id               String   @id @default(cuid())
+  firstName        String
+  lastName         String
+  dateOfBirth      DateTime
+  gender           String
+  contactNumber    String?
+  email            String   @unique
+  address          String?
+  emergencyContact String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user             User?    @relation("UserPatient")
+  medicalRecords   MedicalRecord[]
+  appointments     Appointment[]
+  medications      Medication[]
+  reminders        Reminder[]
+  agentActivities  AgentActivity[]
+
+  @@index([email])
+}
+
+model Provider {
+  id              String   @id @default(cuid())
+  firstName       String
+  lastName        String
+  specialty       String
+  licenseNumber   String   @unique
+  contactNumber   String?
+  email           String   @unique
+  facilityId      String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User?    @relation("UserProvider")
+  facility        Facility @relation(fields: [facilityId], references: [id])
+  medicalRecords  MedicalRecord[]
+  appointments    Appointment[]
+
+  @@index([email])
+  @@index([facilityId])
+}
+
+model Facility {
+  id              String   @id @default(cuid())
+  name            String
+  facilityType    String
+  address         String
+  contactNumber   String?
+  email           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  providers       Provider[]
+  medicalRecords  MedicalRecord[]
+  appointments    Appointment[]
+
+  @@index([name])
+}
+
+model MedicalRecord {
+  id               String   @id @default(cuid())
+  patientId        String
+  providerId       String?
+  facilityId       String
+  recordType       String
+  recordDate       DateTime
+  description      String
+  fileName         String?
+  filePath         String?
+  extractedData    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  patient          Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  provider         Provider? @relation(fields: [providerId], references: [id])
+  facility         Facility @relation(fields: [facilityId], references: [id])
+  medications      Medication[]
+
+  @@index([patientId])
+  @@index([providerId])
+  @@index([facilityId])
+  @@index([recordDate])
+}
+
+model Medication {
+  id               String   @id @default(cuid())
+  patientId        String
+  recordId         String
+  name             String
+  dosage           String?
+  frequency        String?
+  startDate        DateTime
+  endDate          DateTime?
+  indication       String?
+  prescribedBy     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  patient          Patient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  record           MedicalRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([recordId])
+  @@index([name])
+}
+
+model Appointment {
+  id               String   @id @default(cuid())
+  patientId        String
+  providerId       String
+  facilityId       String
+  appointmentDate  DateTime
+  appointmentTime  String
+  status           String
+  reason           String?
+  notes            String?
+  urgency          String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  patient          Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  provider         Provider @relation(fields: [providerId], references: [id])
+  facility         Facility @relation(fields: [facilityId], references: [id])
+
+  @@index([patientId])
+  @@index([providerId])
+  @@index([facilityId])
+  @@index([appointmentDate])
+}
+
+model Reminder {
+  id               String   @id @default(cuid())
+  patientId        String
+  reminderType     String
+  title            String
+  description      String?
+  dueDate          DateTime
+  status           String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  patient          Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([dueDate])
+}
+
+model AgentActivity {
+  id               String   @id @default(cuid())
+  patientId        String
+  agentName        String
+  status           String
+  input            String?
+  output           String?
+  error            String?
+  duration         Int?
+  createdAt        DateTime @default(now())
+
+  patient          Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([agentName])
+  @@index([createdAt])
+}

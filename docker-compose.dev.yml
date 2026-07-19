@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dev-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api-build
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/app_db
+    volumes:
+      - ./api:/workspace/api
+      - ./prisma:/workspace/prisma
+      - /workspace/api/node_modules
+      - /workspace/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "cd api && npx prisma migrate dev --name init && npx ts-node-dev --respawn --transpile-only src/index.ts"
+    networks:
+      - dev-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-build
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    volumes:
+      - ./app:/workspace/app
+      - /workspace/app/node_modules
+      - /workspace/app/.next
+    depends_on:
+      api:
+        condition: service_started
+    command: sh -c "cd app && npx next dev --hostname 0.0.0.0"
+    networks:
+      - dev-network
+
+volumes:
+  postgres_dev_data:
+    driver: local
+
+networks:
+  dev-network:
+    driver: bridge

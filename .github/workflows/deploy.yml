@@ -1,0 +1,154 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: "Skip tests before deploy"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: "20"
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Pre-deploy Tests
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Run Prisma Migrations
+        run: npx prisma migrate deploy
+        working-directory: api
+      - name: Run Tests
+        run: npm test --workspaces --if-present
+
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: [test]
+    if: ${{ always() && (needs.test.result == 'success' || inputs.skip_tests) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        target:
+          - service: api
+            stage: api-production
+            port: "3001"
+          - service: app
+            stage: app-production
+            port: "3000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.target.service }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ matrix.target.stage }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [build-and-push]
+    if: ${{ inputs.environment == 'staging' || (!inputs.environment && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Deploy API
+        run: echo "Deploy API container to staging cluster"
+        env:
+          API_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-api:latest
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+          NODE_ENV: production
+          PORT: 3001
+
+      - name: Deploy App
+        run: echo "Deploy App container to staging cluster"
+        env:
+          APP_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-app:latest
+          NEXT_PUBLIC_API_URL: ${{ secrets.STAGING_API_URL }}
+          NODE_ENV: production
+          PORT: 3000
+
+  deploy-production:
+    name: Deploy to Production
+    needs: [build-and-push]
+    if: ${{ inputs.environment == 'production' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy API
+        run: echo "Deploy API container to production cluster"
+        env:
+          API_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-api:latest
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.PROD_JWT_SECRET }}
+          NODE_ENV: production
+          PORT: 3001
+
+      - name: Deploy App
+        run: echo "Deploy App container to production cluster"
+        env:
+          APP_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-app:latest
+          NEXT_PUBLIC_API_URL: ${{ secrets.PROD_API_URL }}
+          NODE_ENV: production
+          PORT: 3000
