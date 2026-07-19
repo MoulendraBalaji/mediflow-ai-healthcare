@@ -31,6 +31,7 @@ RUN npm ci --workspace=app
 COPY app ./app
 
 WORKDIR /workspace/app
+ENV NEXT_PUBLIC_API_URL=http://localhost:3001/api
 RUN npx next build
 
 # ============================================================
@@ -46,7 +47,7 @@ COPY --from=api-build /workspace/api/dist ./dist
 COPY --from=api-build /workspace/api/package.json ./
 COPY --from=api-build /workspace/node_modules ./node_modules
 COPY --from=api-build /workspace/prisma ./prisma
-COPY --from=api-build /workspace/api/node_modules/.prisma ./node_modules/.prisma
+COPY --from=api-build /workspace/node_modules/.prisma ./node_modules/.prisma
 
 ENV NODE_ENV=production
 ENV PORT=3001
