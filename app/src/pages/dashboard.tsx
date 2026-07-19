@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
+import Link from 'next/link';
 import Layout from '../components/Layout';
 import AgentActivityLog from '../components/AgentActivityLog';
 import { api } from '../lib/api';
@@ -176,17 +177,17 @@ export default function DashboardPage() {
               <p className="text-navy-500 text-sm mb-4">
                 Your complete medical record timeline. View all encounters, medications, and lab results.
               </p>
-              <a href="/timeline" className="inline-flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:from-brand-700 hover:to-brand-800 transition-all duration-200 shadow-brand hover:shadow-lg hover:-translate-y-0.5 text-sm">
+              <Link href="/timeline" className="inline-flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:from-brand-700 hover:to-brand-800 transition-all duration-200 shadow-brand hover:shadow-lg hover:-translate-y-0.5 text-sm">
                 View Full Timeline
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                 </svg>
-              </a>
+              </Link>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {quickLinks.map((link, i) => (
-                <a
+                <Link
                   key={link.href}
                   href={link.href}
                   className={`card-blur p-4 group animate-slide-up stagger-${i + 1}`}
@@ -198,7 +199,7 @@ export default function DashboardPage() {
                   </div>
                   <p className="text-sm font-semibold text-navy-900">{link.label}</p>
                   <p className="text-xs text-navy-400 mt-0.5">{link.desc}</p>
-                </a>
+                </Link>
               ))}
             </div>
           </div>
@@ -218,9 +219,9 @@ export default function DashboardPage() {
                   ))}
                 </div>
                 <div className="px-5 py-3 border-t border-navy-100/50">
-                  <a href="/reminders" className="text-xs font-semibold text-brand-600 hover:text-brand-700 transition-colors">
+                  <Link href="/reminders" className="text-xs font-semibold text-brand-600 hover:text-brand-700 transition-colors">
                     View all reminders →
-                  </a>
+                  </Link>
                 </div>
               </div>
             )}

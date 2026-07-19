@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
+import Link from 'next/link';
 import Layout from '../components/Layout';
 import { api } from '../lib/api';
 
@@ -201,12 +202,12 @@ export default function TimelinePage() {
                   </svg>
                 </div>
                 <p className="text-navy-600 font-medium">No medical records yet</p>
-                <a href="/upload" className="inline-flex items-center gap-2 mt-3 text-sm font-semibold text-brand-600 hover:text-brand-700 transition-colors">
+                <Link href="/upload" className="inline-flex items-center gap-2 mt-3 text-sm font-semibold text-brand-600 hover:text-brand-700 transition-colors">
                   Upload your first document
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                   </svg>
-                </a>
+                </Link>
               </div>
             ) : (
               records.map((record, index) => {

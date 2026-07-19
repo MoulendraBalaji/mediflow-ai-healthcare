@@ -21,6 +21,6 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
     return res.status(401).json({ error: 'Unauthorized', message: 'Invalid or expired token' });
   }
 
-  req.user = decoded;
+  req.user = decoded as { userId: string; email: string; role: string };
   next();
 }
