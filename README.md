@@ -30,24 +30,6 @@ MediFlow is an AI-powered healthcare navigation and patient care coordination pl
 
 ---
 
-## Screenshots
-
-<div align="center">
-
-> *Add screenshots of the dashboard, timeline, navigator, and other key screens here.*
-
-| Dashboard | Medical Timeline | Care Navigator |
-|:---------:|:----------------:|:--------------:|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Timeline](docs/screenshots/timeline.png) | ![Navigator](docs/screenshots/navigator.png) |
-
-| Document Upload | Health Insights | Reminders |
-|:---------------:|:---------------:|:---------:|
-| ![Upload](docs/screenshots/upload.png) | ![Insights](docs/screenshots/insights.png) | ![Reminders](docs/screenshots/reminders.png) |
-
-</div>
-
----
-
 ## Quick Start
 
 ### Prerequisites
