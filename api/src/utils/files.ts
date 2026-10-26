@@ -47,7 +47,9 @@ export function isImage(type: DetectedFileType): boolean {
 
 /** Keep only a safe basename; never trust originalname. */
 export function sanitizeFileName(original: string | undefined, fallback = 'document'): string {
-  const base = path.basename(original ?? '').replace(/[^\w.\- ()]/g, '_').trim();
+  if (!original) return fallback;
+  const normalized = original.replace(/\\/g, '/');
+  const base = path.posix.basename(normalized).replace(/[^\w.\- ()]/g, '_').trim();
   const cleaned = base.replace(/^\.+/, '').slice(0, 120);
   return cleaned || fallback;
 }
