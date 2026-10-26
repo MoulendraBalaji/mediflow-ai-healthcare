@@ -1,142 +1,135 @@
-import React, { useState } from 'react';
-import { useRouter } from 'next/router';
+import Head from 'next/head';
 import Link from 'next/link';
-import { api, setToken } from '../lib/api';
+import { useRouter } from 'next/router';
+import { useEffect, useState, type FormEvent } from 'react';
+import { AuthLayout } from '../components/AuthLayout';
+import { Alert } from '../components/ui/Alert';
+import { Button } from '../components/ui/Button';
+import { TextField } from '../components/ui/Field';
+import { useAuth } from '../lib/auth';
+import { errorMessage, isApiError } from '../lib/api';
+import { homeForRole } from '../lib/navigation';
 
 export default function LoginPage() {
+  const { login, user, status } = useAuth();
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const nextParam = typeof router.query.next === 'string' ? router.query.next : null;
+
+  useEffect(() => {
+    if (status === 'authenticated' && user) {
+      const target = nextParam && nextParam.startsWith('/') && !nextParam.startsWith('//') ? nextParam : homeForRole(user.role);
+      void router.replace(target);
+    }
+  }, [status, user, nextParam, router]);
+
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setError(null);
-    setLoading(true);
-
+    setFieldErrors({});
+    setSubmitting(true);
     try {
-      const response = await api.login(email, password);
-      const { token, user } = response.data;
-
-      setToken(token);
-      localStorage.setItem('user', JSON.stringify(user));
-
-      if (user.role === 'PATIENT') {
-        router.push('/dashboard');
-      } else if (user.role === 'DOCTOR') {
-        router.push('/doctor-portal');
-      } else {
-        router.push('/admin');
+      const signedIn = await login(email.trim(), password);
+      const target =
+        nextParam && nextParam.startsWith('/') && !nextParam.startsWith('//')
+          ? nextParam
+          : homeForRole(signedIn.role);
+      await router.replace(target);
+    } catch (caught) {
+      if (isApiError(caught) && Array.isArray(caught.details)) {
+        const mapped: Record<string, string> = {};
+        for (const detail of caught.details as Array<{ path?: string; message?: string }>) {
+          if (detail.path && detail.message) mapped[detail.path] = detail.message;
+        }
+        setFieldErrors(mapped);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Login failed. Please try again.');
-      setPassword('');
+      setError(errorMessage(caught));
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen relative overflow-hidden gradient-medical flex items-center justify-center p-4">
-      <div className="floating-orb floating-orb-1" />
-      <div className="floating-orb floating-orb-2" />
-      <div className="floating-orb floating-orb-3" />
+    <AuthLayout
+      eyebrow="Sign in"
+      title="Pick up where you left off."
+      description="Your documents, chronology and care plan are waiting. Sign in with the email you registered."
+      asideTitle="A record that explains itself."
+      asidePoints={[
+        'Documents are read, then shown to you before anything is saved.',
+        'The timeline checks gaps, duplicates and rule-based interactions.',
+        'Every clinical output is labelled as AI-assisted or rule-based.',
+        'If something cannot be read, MediFlow says so rather than guessing.',
+      ]}
+    >
+      <Head>
+        <title>Sign in · MediFlow</title>
+      </Head>
 
-      <div className="relative z-10 w-full max-w-md animate-scale-in">
-        <div className="glass-card rounded-3xl p-8 sm:p-10 shadow-float-lg">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-500 to-medical-500 flex items-center justify-center mx-auto mb-4 shadow-lg animate-float-slow">
-              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-              </svg>
-            </div>
-            <h1 className="text-3xl font-bold text-navy-900">Welcome back</h1>
-            <p className="text-navy-500 mt-2 text-sm">Sign in to your MediFlow account</p>
-          </div>
+      <form onSubmit={onSubmit} className="space-y-5" noValidate>
+        {error ? (
+          <Alert tone="danger" title="Could not sign in">
+            {error}
+          </Alert>
+        ) : null}
 
-          {error && (
-            <div className="bg-red-50/80 backdrop-blur border border-red-200/50 rounded-xl p-4 mb-6 animate-slide-down">
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-sm text-red-700 font-medium">{error}</p>
-              </div>
-            </div>
-          )}
+        <TextField
+          label="Email address"
+          type="email"
+          name="email"
+          autoComplete="email"
+          required
+          value={email}
+          onChange={(event) => setEmail(event.target.value)}
+          error={fieldErrors.email}
+          placeholder="you@example.com"
+        />
 
-          <form onSubmit={handleLogin} className="space-y-5">
-            <div className="space-y-1.5">
-              <label htmlFor="email" className="block text-sm font-semibold text-navy-700">
-                Email address
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                className="input-blur"
-                required
-              />
-            </div>
+        <TextField
+          label="Password"
+          type="password"
+          name="password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          error={fieldErrors.password}
+          placeholder="Your password"
+        />
 
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label htmlFor="password" className="block text-sm font-semibold text-navy-700">
-                  Password
-                </label>
-                <Link href="/forgot-password" className="text-xs font-semibold text-brand-600 hover:text-brand-700 transition-colors">
-                  Forgot password?
-                </Link>
-              </div>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                className="input-blur"
-                required
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white font-semibold rounded-xl
-                         hover:from-brand-700 hover:to-brand-800 active:from-brand-800 active:to-brand-900
-                         transition-all duration-200 shadow-brand hover:shadow-lg
-                         hover:-translate-y-0.5 active:translate-y-0
-                         disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none
-                         flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Signing in...
-                </>
-              ) : (
-                'Sign in'
-              )}
-            </button>
-          </form>
-
-          <div className="mt-8 text-center">
-            <p className="text-sm text-navy-500">
-              Don&apos;t have an account?{' '}
-              <Link href="/register" className="font-semibold text-brand-600 hover:text-brand-700 transition-colors">
-                Create one now
-              </Link>
-            </p>
-          </div>
+        <div className="flex items-center justify-between gap-4">
+          <Link href="/forgot-password" className="btn-link text-sm">
+            Forgot password?
+          </Link>
+          <p className="text-xs text-ink-faint">Cookies are httpOnly and same-site.</p>
         </div>
 
-        <p className="text-center text-xs text-white/50 mt-6">
-          Secure, AI-powered healthcare navigation
+        <Button type="submit" loading={submitting} className="w-full">
+          {submitting ? 'Signing in' : 'Sign in'}
+        </Button>
+      </form>
+
+      <p className="mt-6 border-t border-rule pt-5 text-sm text-ink-soft">
+        New to MediFlow?{' '}
+        <Link href="/register" className="btn-link">
+          Create a patient account
+        </Link>
+      </p>
+
+      <div className="mt-6 border border-rule bg-surface p-4">
+        <p className="font-mono text-2xs uppercase tracking-[0.12em] text-ink-faint">Seeded demo accounts</p>
+        <p className="mt-2 text-xs leading-relaxed text-ink-soft">
+          Patient <span className="font-mono">robert.anderson@mediflow.dev</span> · clinician{' '}
+          <span className="font-mono">john.smith@mediflow.dev</span> · admin{' '}
+          <span className="font-mono">admin@mediflow.dev</span>. The password comes from{' '}
+          <span className="font-mono">DEMO_PASSWORD</span>; it is never printed by the app.
         </p>
       </div>
-    </div>
+    </AuthLayout>
   );
 }

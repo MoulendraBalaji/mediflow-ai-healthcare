@@ -1,149 +1,313 @@
-import React, { useState } from 'react';
-import Layout from '../components/Layout';
-import { api } from '../lib/api';
+import Head from 'next/head';
+import { useMutation } from '@tanstack/react-query';
+import { useState, type FormEvent } from 'react';
+import { AppShell } from '../components/AppShell';
+import { Alert, ClinicalDisclaimer, ModeNote } from '../components/ui/Alert';
+import { Button } from '../components/ui/Button';
+import { SelectField, TextAreaField } from '../components/ui/Field';
+import { EmptyState, PageHeader, SectionHeading } from '../components/ui/Layout';
+import { api, errorMessage } from '../lib/api';
+import type { ExplanationResult, TranslationResult } from '../lib/types';
+import { usePatientScope } from '../lib/usePatientScope';
 
-const LANGUAGES = [
-  'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
-  'Chinese', 'Japanese', 'Korean', 'Arabic', 'Hindi', 'Russian',
-  'Dutch', 'Swedish', 'Turkish', 'Thai', 'Vietnamese', 'Indonesian',
+type Mode = 'explain' | 'translate';
+
+const MODES: Array<{ value: Mode; label: string; description: string }> = [
+  {
+    value: 'explain',
+    label: 'Explain a prescription',
+    description: 'Plain-language explanation of what is written and what to ask a pharmacist about.',
+  },
+  {
+    value: 'translate',
+    label: 'Translate',
+    description: 'Translate the text while keeping medicine names, doses and warnings intact.',
+  },
 ];
 
-export default function TranslatePage() {
-  const [inputText, setInputText] = useState('');
-  const [language, setLanguage] = useState('Spanish');
-  const [result, setResult] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'prescription' | 'translate'>('prescription');
+const EXPLAIN_LANGUAGES = [
+  'English',
+  'Spanish',
+  'French',
+  'Hindi',
+  'Tamil',
+  'Arabic',
+  'Portuguese',
+  'Simplified Chinese',
+];
 
-  const handleExplain = async () => {
-    if (!inputText.trim()) { setError('Please enter text to explain'); return; }
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = mode === 'prescription'
-        ? await api.explainPrescription(inputText, language)
-        : await api.translateText(inputText, language);
-      setResult(res.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to process');
-    } finally { setLoading(false); }
+const TRANSLATE_LANGUAGES = [
+  'Spanish',
+  'French',
+  'Hindi',
+  'Tamil',
+  'Arabic',
+  'Portuguese',
+  'Simplified Chinese',
+  'English',
+];
+
+type RunVariables = { mode: Mode; text: string; language: string };
+type RunResult = ExplanationResult | TranslationResult;
+
+export default function TranslatePage() {
+  const { patientId } = usePatientScope();
+  const [mode, setMode] = useState<Mode>('explain');
+  const [text, setText] = useState('');
+  const [explainLanguage, setExplainLanguage] = useState('English');
+  const [translateLanguage, setTranslateLanguage] = useState('Spanish');
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const run = useMutation<RunResult, unknown, RunVariables>({
+    mutationFn: (variables) => {
+      const scopedPatientId = patientId ?? undefined;
+      if (variables.mode === 'explain') {
+        return api.providers.explain(variables.text, variables.language, scopedPatientId);
+      }
+      return api.providers.translate(variables.text, variables.language, scopedPatientId);
+    },
+  });
+
+  const language = mode === 'explain' ? explainLanguage : translateLanguage;
+  const result = run.data;
+  const resultMode = result && run.variables?.mode === mode ? mode : null;
+  const explanation = resultMode === 'explain' && result && 'explanation' in result ? result : null;
+  const translation = resultMode === 'translate' && result && 'translated' in result ? result : null;
+
+  const switchMode = (next: Mode) => {
+    if (next === mode) return;
+    setMode(next);
+    setLocalError(null);
+    run.reset();
   };
 
-  const samplePrescriptions = [
-    'Metformin 500mg - Take twice daily with meals for Type 2 Diabetes',
-    'Lisinopril 10mg - Once daily in the morning for blood pressure control',
-    'Amoxicillin 500mg - Three times daily for 7 days, take with or without food',
-    'Atorvastatin 20mg - Once daily at bedtime for cholesterol management',
-  ];
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLocalError(null);
+    if (text.trim().length === 0) {
+      setLocalError('Paste the prescription text or directions you want explained.');
+      return;
+    }
+    if (text.length > 8000) {
+      setLocalError('Keep the text under 8,000 characters. Split a very long document.');
+      return;
+    }
+    run.mutate({ mode, text: text.trim(), language });
+  };
 
   return (
-    <Layout>
-      <div className="max-w-4xl mx-auto space-y-8">
-        <div className="animate-slide-up">
-          <h1 className="text-3xl font-bold text-navy-900 tracking-tight">Prescription Explainer</h1>
-          <p className="text-navy-500 mt-1">
-            Get simple, multilingual explanations of your prescriptions and medical documents.
-          </p>
-        </div>
+    <AppShell>
+      <Head>
+        <title>Explain a prescription · MediFlow</title>
+      </Head>
 
-        <div className="flex gap-2">
-          <button onClick={() => setMode('prescription')}
-            className={`px-6 py-2 rounded-xl font-semibold transition-all duration-200 ${
-              mode === 'prescription' ? 'bg-brand-600 text-white shadow-brand' : 'bg-navy-100 text-navy-600 hover:bg-navy-200'
-            }`}>Explain Prescription</button>
-          <button onClick={() => setMode('translate')}
-            className={`px-6 py-2 rounded-xl font-semibold transition-all duration-200 ${
-              mode === 'translate' ? 'bg-brand-600 text-white shadow-brand' : 'bg-navy-100 text-navy-600 hover:bg-navy-200'
-            }`}>Translate Medical Text</button>
-        </div>
+      <PageHeader
+        eyebrow="Explain"
+        title="Read the label with confidence."
+        description="Paste what is printed. MediFlow can explain it in plain language or translate it without changing a medicine name, a dose or a warning. It will not tell you to take something different."
+        meta={
+          <>
+            <span className="tag-neutral">Nothing is saved to the chart</span>
+            <span className="font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+              AI-assisted · unavailable results are labelled
+            </span>
+          </>
+        }
+      />
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="card-blur p-6 animate-slide-up">
-              <label className="block text-sm font-semibold text-navy-700 mb-2">
-                {mode === 'prescription' ? 'Paste your prescription text' : 'Medical text to translate'}
-              </label>
-              <textarea
-                value={inputText}
-                onChange={e => setInputText(e.target.value)}
-                rows={6}
-                className="input-blur"
-                placeholder={mode === 'prescription'
-                  ? 'Enter prescription text, medication names, or medical instructions...'
-                  : 'Enter medical text to translate...'}
-              />
-              <div className="mt-4">
-                <label className="block text-sm font-semibold text-navy-700 mb-2">Target Language</label>
-                <select value={language} onChange={e => setLanguage(e.target.value)} className="input-solid">
-                  {LANGUAGES.map(lang => (
-                    <option key={lang} value={lang}>{lang}</option>
-                  ))}
-                </select>
+      <div className="mt-8 grid grid-cols-1 gap-1 border border-rule bg-rule sm:grid-cols-2">
+        {MODES.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={mode === option.value}
+            onClick={() => switchMode(option.value)}
+            className={
+              mode === option.value
+                ? 'bg-surface px-5 py-4 text-left'
+                : 'bg-paper px-5 py-4 text-left hover:bg-surface'
+            }
+          >
+            <span className="font-display text-xl text-ink">{option.label}</span>
+            <span className="mt-1 block text-sm leading-relaxed text-ink-soft">{option.description}</span>
+          </button>
+        ))}
+      </div>
+
+      {localError ? (
+        <Alert tone="warning" title="Check the text" className="mt-6">
+          {localError}
+        </Alert>
+      ) : null}
+
+      {run.isError ? (
+        <Alert tone="danger" title="The request did not complete" className="mt-6">
+          {errorMessage(run.error)}
+        </Alert>
+      ) : null}
+
+      <div className="mt-10 grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:gap-14">
+        <section aria-labelledby="input-heading">
+          <SectionHeading
+            number="01"
+            id="input-heading"
+            title="What does it say?"
+            description="Copy the printed directions exactly. Do not add a dose or a diagnosis that is not on the label."
+          />
+
+          <form onSubmit={onSubmit} className="mt-5 space-y-4">
+            <TextAreaField
+              label={mode === 'explain' ? 'Prescription text or directions' : 'Text to translate'}
+              required
+              rows={8}
+              maxLength={8000}
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              placeholder={
+                mode === 'explain'
+                  ? 'e.g. Metformin 500 mg — take one tablet twice daily with meals. Return if you have persistent nausea.'
+                  : 'Paste the directions exactly as printed.'
+              }
+              hint={`${text.length.toLocaleString()} / 8,000 characters`}
+            />
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <SelectField
+                label={mode === 'explain' ? 'Explanation language' : 'Translate into'}
+                value={language}
+                onChange={(event) =>
+                  mode === 'explain'
+                    ? setExplainLanguage(event.target.value)
+                    : setTranslateLanguage(event.target.value)
+                }
+              >
+                {(mode === 'explain' ? EXPLAIN_LANGUAGES : TRANSLATE_LANGUAGES).map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </SelectField>
+              <div className="flex items-end">
+                <Button type="submit" loading={run.isPending} className="w-full">
+                  {run.isPending
+                    ? mode === 'explain'
+                      ? 'Explaining'
+                      : 'Translating'
+                    : mode === 'explain'
+                      ? 'Explain this text'
+                      : 'Translate this text'}
+                </Button>
               </div>
-              <button onClick={handleExplain} disabled={loading || !inputText.trim()}
-                className="mt-4 w-full py-3.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:from-brand-700 hover:to-brand-800 transition-all duration-200 shadow-brand disabled:opacity-50 flex items-center justify-center gap-2">
-                {loading ? (
-                  <>
-                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Processing...
-                  </>
-                ) : mode === 'prescription' ? `Explain in ${language}` : `Translate to ${language}`}
-              </button>
             </div>
 
-            {error && (
-              <div className="bg-red-50/80 backdrop-blur border border-red-200/50 rounded-xl p-4 animate-slide-down">
-                <p className="text-sm text-red-700 font-medium">{error}</p>
-              </div>
-            )}
+            <p className="border-t border-rule pt-4 text-xs leading-relaxed text-ink-faint">
+              The text is sent to the configured AI provider only when you press the button. It is not
+              written to the medical record. If no AI key is configured, or the service is down, the result
+              says so and the original text is left unchanged.
+            </p>
+          </form>
+        </section>
 
-            {result && (
-              <div className="card-blur p-6 animate-slide-up">
-                <h3 className="font-semibold text-navy-900 mb-4">
-                  {mode === 'prescription' ? `Explanation (${language})` : `Translation (${language})`}
-                </h3>
-                <div className="bg-brand-50/50 border border-brand-100 rounded-xl p-4">
-                  <p className="text-sm text-navy-800 whitespace-pre-wrap leading-relaxed">
-                    {result.explanation || result.translated}
+        <section aria-labelledby="output-heading">
+          <SectionHeading
+            number="02"
+            id="output-heading"
+            title="The explanation"
+            description="The original stays visible so you can check every medicine and number."
+          />
+
+          <div className="mt-5">
+            {run.isPending ? (
+              <div className="border border-rule bg-surface p-6">
+                <p className="font-display text-xl text-ink">
+                  {mode === 'explain' ? 'Writing a plain-language explanation…' : 'Translating the text…'}
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+                  Medicine names, doses and warnings are preserved. Nothing is added to the record.
+                </p>
+              </div>
+            ) : !result || !resultMode ? (
+              <EmptyState
+                title="Nothing to read yet"
+                description="Paste the printed text and choose a language. The explanation or translation appears here, alongside the original."
+              />
+            ) : (
+              <div className="space-y-5">
+                <div className="border border-rule bg-paper p-5">
+                  <p className="eyebrow">Original text</p>
+                  <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-soft">
+                    {result.original}
                   </p>
                 </div>
-                {result.original && (
-                  <div className="mt-4">
-                    <h4 className="text-xs font-semibold text-navy-400 mb-2 uppercase tracking-wider">Original Text</h4>
-                    <p className="text-sm text-navy-700 bg-navy-50/50 p-3 rounded-xl">{result.original}</p>
-                  </div>
-                )}
+
+                {explanation ? (
+                  <>
+                    {!explanation.available ? (
+                      <Alert tone="warning" title="AI unavailable">
+                        {explanation.message ??
+                          'No explanation was generated. Read the printed label exactly as written and ask a pharmacist about anything that is unclear.'}
+                      </Alert>
+                    ) : null}
+                    <div className="border border-rule bg-surface p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="eyebrow">Explanation · {explanation.language}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {explanation.cached ? <span className="tag-neutral">cached</span> : null}
+                          <ModeNote mode={explanation.mode} />
+                        </div>
+                      </div>
+                      <p className="mt-3 whitespace-pre-wrap break-words text-[1.0625rem] leading-[1.75] text-ink-soft">
+                        {explanation.explanation}
+                      </p>
+                    </div>
+                  </>
+                ) : null}
+
+                {translation ? (
+                  <>
+                    {!translation.available ? (
+                      <Alert tone="warning" title="Translation unavailable">
+                        {translation.message ??
+                          'Translation is unavailable right now. The original text has been left unchanged and nothing was invented.'}
+                      </Alert>
+                    ) : null}
+                    <div className="border border-rule bg-surface p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="eyebrow">Translation · {translation.language}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {translation.cached ? <span className="tag-neutral">cached</span> : null}
+                          <ModeNote mode={translation.mode} />
+                        </div>
+                      </div>
+                      {translation.translated ? (
+                        <p className="mt-3 whitespace-pre-wrap break-words text-[1.0625rem] leading-[1.75] text-ink-soft">
+                          {translation.translated}
+                        </p>
+                      ) : (
+                        <p className="mt-3 text-sm leading-relaxed text-ink-faint">
+                          No translated text was produced.
+                        </p>
+                      )}
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="border-t border-rule pt-4 text-xs leading-relaxed text-ink-faint">
+                  <p>
+                    An explanation is not a prescription. Do not change how you take a medicine based on
+                    this screen — confirm with the printed label, your pharmacist or your prescriber.
+                  </p>
+                  <p className="mt-2">
+                    Cached results reuse an identical earlier request. The label shows when that happened.
+                  </p>
+                </div>
               </div>
             )}
           </div>
 
-          <div className="space-y-6">
-            <div className="card-blur bg-gradient-to-br from-brand-50/50 to-medical-50/50 p-6 animate-slide-up">
-              <h3 className="font-semibold text-navy-900 mb-3">How it works</h3>
-              <ul className="space-y-2.5 text-xs text-navy-600">
-                <li className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[10px] font-bold">1</span> Paste your prescription or medical text</li>
-                <li className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[10px] font-bold">2</span> Select the target language</li>
-                <li className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[10px] font-bold">3</span> Get a simple, clear explanation</li>
-                <li className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[10px] font-bold">4</span> Understand your medications better</li>
-              </ul>
-            </div>
-
-            <div className="card-blur bg-gradient-to-br from-blue-50/50 to-cyan-50/50 p-6 animate-slide-up">
-              <h3 className="font-semibold text-navy-900 mb-3">Try a sample</h3>
-              <div className="space-y-2">
-                {samplePrescriptions.map((sample, i) => (
-                  <button key={i} onClick={() => setInputText(sample)}
-                    className="w-full text-left px-3 py-2.5 bg-white/60 rounded-xl text-xs text-navy-700 hover:bg-white transition-colors border border-navy-100/50">
-                    {sample.substring(0, 55)}...
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
+          <ClinicalDisclaimer className="mt-8" />
+        </section>
       </div>
-    </Layout>
+    </AppShell>
   );
 }

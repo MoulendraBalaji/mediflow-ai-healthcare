@@ -1,230 +1,462 @@
-import React, { useState, useEffect } from 'react';
-import { useRouter } from 'next/router';
-import Layout from '../components/Layout';
-import { api } from '../lib/api';
+import Head from 'next/head';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { AppShell } from '../components/AppShell';
+import { PatientScopeEmpty } from '../components/PatientScopeEmpty';
+import { Alert, ClinicalDisclaimer, ModeNote } from '../components/ui/Alert';
+import { Button } from '../components/ui/Button';
+import { SelectField, TextAreaField, TextField } from '../components/ui/Field';
+import { EmptyState, PageHeader, SectionHeading, Stat, Skeleton } from '../components/ui/Layout';
+import { api, errorMessage } from '../lib/api';
+import {
+  formatDate,
+  relativeTime,
+  REMINDER_TYPE_LABELS,
+  scoreTone,
+  todayInput,
+} from '../lib/format';
+import type { CompanionResult, Reminder, ReminderStatus, ReminderType } from '../lib/types';
+import { usePatientScope } from '../lib/usePatientScope';
 
-interface Reminder {
-  id: string;
-  reminderType: string;
-  title: string;
-  description?: string;
-  dueDate: string;
-  status: string;
-  createdAt: string;
+type Filter = 'ALL' | ReminderStatus;
+
+const FILTERS: Array<{ value: Filter; label: string }> = [
+  { value: 'ALL', label: 'All' },
+  { value: 'PENDING', label: 'Pending' },
+  { value: 'ACKNOWLEDGED', label: 'Acknowledged' },
+  { value: 'DISMISSED', label: 'Dismissed' },
+];
+
+const REMINDER_TYPES: ReminderType[] = ['MEDICATION', 'APPOINTMENT', 'FOLLOW_UP', 'REFILL'];
+
+const STATUS_CLASS: Record<ReminderStatus, string> = {
+  PENDING: 'tag-ochre',
+  SENT: 'tag-sky',
+  ACKNOWLEDGED: 'tag-pine',
+  DISMISSED: 'tag-neutral',
+};
+
+function isOverdue(reminder: Reminder): boolean {
+  return reminder.status === 'PENDING' && new Date(reminder.dueDate).getTime() < Date.now();
 }
 
-interface PatientData { id: string; firstName: string; lastName: string; }
-
 export default function RemindersPage() {
-  const router = useRouter();
-  const [patient, setPatient] = useState<PatientData | null>(null);
-  const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [stats, setStats] = useState({ pending: 0, sent: 0, acknowledged: 0, overdue: 0, total: 0 });
-  const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [filter, setFilter] = useState('all');
-  const [error, setError] = useState<string | null>(null);
-  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const { patientId, isStaff } = usePatientScope();
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const session = await api.getSession();
-        const user = session.data.user;
-        if (user.role !== 'PATIENT') { router.push('/login'); return; }
-        setPatient(user.patient);
-        await loadReminders(user.patient.id);
-        await loadStats(user.patient.id);
-      } catch { router.push('/login'); }
-      finally { setLoading(false); }
-    };
-    load();
-  }, [router]);
+  const [filter, setFilter] = useState<Filter>('ALL');
+  const [reminderType, setReminderType] = useState<ReminderType>('MEDICATION');
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [dueDate, setDueDate] = useState(todayInput());
+  const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const loadReminders = async (patientId: string) => {
-    const res = await api.getReminders(patientId);
-    setReminders(res.data.reminders || []);
+  const remindersQuery = useQuery({
+    queryKey: ['reminders', patientId],
+    queryFn: () => api.reminders.list(patientId as string),
+    enabled: Boolean(patientId),
+  });
+
+  const statsQuery = useQuery({
+    queryKey: ['reminder-stats', patientId],
+    queryFn: () => api.reminders.stats(patientId as string),
+    enabled: Boolean(patientId),
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['reminders', patientId] });
+    void queryClient.invalidateQueries({ queryKey: ['reminder-stats', patientId] });
+    void queryClient.invalidateQueries({ queryKey: ['dashboard-metrics', patientId] });
+    void queryClient.invalidateQueries({ queryKey: ['agent-activity', patientId] });
   };
 
-  const loadStats = async (patientId: string) => {
-    const res = await api.getReminderStats(patientId);
-    setStats(res.data);
+  const create = useMutation({
+    mutationFn: () => {
+      if (!patientId) throw new Error('Choose a patient first');
+      if (title.trim().length < 2) throw new Error('Add a title of at least two characters');
+      if (!dueDate) throw new Error('Choose a due date');
+      return api.reminders.create({
+        patientId,
+        reminderType,
+        title: title.trim(),
+        description: description.trim() || undefined,
+        dueDate,
+      });
+    },
+    onSuccess: (result) => {
+      refresh();
+      setTitle('');
+      setDescription('');
+      setDueDate(todayInput());
+      setFormError(null);
+      setNotice(`Reminder saved for ${formatDate(result.reminder.dueDate)}. No message has been sent.`);
+    },
+    onError: (error) => setFormError(errorMessage(error)),
+  });
+
+  const generate = useMutation<CompanionResult, unknown, void>({
+    mutationFn: () => {
+      if (!patientId) throw new Error('Choose a patient first');
+      return api.reminders.generate(patientId);
+    },
+    onSuccess: (result) => {
+      refresh();
+      setNotice(
+        result.created
+          ? `${result.created} new ${result.created === 1 ? 'reminder' : 'reminders'} added from the recorded plan.`
+          : 'The plan produced no new reminders. Existing entries were left unchanged.'
+      );
+    },
+  });
+
+  const acknowledge = useMutation({
+    mutationFn: (id: string) => api.reminders.acknowledge(id),
+    onSuccess: () => {
+      refresh();
+      setNotice('Marked as acknowledged. This records that you saw it; it is not a message receipt.');
+    },
+    onError: (error) => setNotice(errorMessage(error)),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.reminders.remove(id),
+    onSuccess: () => {
+      refresh();
+      setNotice('Reminder deleted.');
+    },
+    onError: (error) => setNotice(errorMessage(error)),
+  });
+
+  if (!patientId) return <PatientScopeEmpty />;
+
+  const reminders = remindersQuery.data?.reminders ?? [];
+  const stats = statsQuery.data;
+  const filtered = filter === 'ALL' ? reminders : reminders.filter((reminder) => reminder.status === filter);
+  const companion = generate.data;
+
+  const askRemove = (reminder: Reminder) => {
+    const confirmed =
+      typeof window === 'undefined'
+        ? false
+        : window.confirm(`Delete the reminder “${reminder.title}”?`);
+    if (confirmed) remove.mutate(reminder.id);
   };
-
-  const handleGenerate = async () => {
-    if (!patient) return;
-    setGenerating(true);
-    setError(null);
-    try {
-      const res = await api.generateCompanion(patient.id);
-      setAiSummary(res.data.data?.aiSummary || 'Reminders generated successfully');
-      await loadReminders(patient.id);
-      await loadStats(patient.id);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to generate reminders');
-    } finally { setGenerating(false); }
-  };
-
-  const handleAcknowledge = async (id: string) => {
-    try {
-      await api.acknowledgeReminder(id);
-      if (patient) { await loadReminders(patient.id); await loadStats(patient.id); }
-    } catch (err: any) { setError(err.message); }
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      await api.deleteReminder(id);
-      if (patient) { await loadReminders(patient.id); await loadStats(patient.id); }
-    } catch (err: any) { setError(err.message); }
-  };
-
-  const getTypeColor = (type: string) => {
-    switch (type) {
-      case 'Medication': return 'badge-info';
-      case 'Appointment': return 'badge-success';
-      case 'FollowUp': return 'badge-warning';
-      case 'Refill': return 'badge-brand';
-      default: return 'bg-navy-100 text-navy-600 badge';
-    }
-  };
-
-  const filteredReminders = filter === 'all' ? reminders
-    : filter === 'overdue' ? reminders.filter(r => r.status === 'Pending' && new Date(r.dueDate) < new Date())
-    : reminders.filter(r => r.status.toLowerCase() === filter);
-
-  if (loading) {
-    return (
-      <Layout>
-        <div className="flex items-center justify-center min-h-[60vh]">
-          <div className="w-12 h-12 border-3 border-brand-200 border-t-brand-600 rounded-full animate-spin" />
-        </div>
-      </Layout>
-    );
-  }
-
-  const statCards = [
-    { label: 'Pending', value: stats.pending, color: 'text-blue-600', bg: 'bg-blue-50' },
-    { label: 'Overdue', value: stats.overdue, color: 'text-red-600', bg: 'bg-red-50' },
-    { label: 'Acknowledged', value: stats.acknowledged, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-    { label: 'Total', value: stats.total, color: 'text-navy-600', bg: 'bg-navy-50' },
-  ];
 
   return (
-    <Layout patientName={patient ? `${patient.firstName} ${patient.lastName}` : ''} patientId={patient?.id}>
-      <div className="space-y-8">
-        <div className="flex flex-col sm:flex-row justify-between items-start gap-4 animate-slide-up">
-          <div>
-            <h1 className="text-3xl font-bold text-navy-900 tracking-tight">Reminders</h1>
-            <p className="text-navy-500 mt-1">Stay on top of your medications, appointments, and follow-ups.</p>
-          </div>
-          <button onClick={handleGenerate} disabled={generating}
-            className="px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:from-brand-700 hover:to-brand-800 transition-all duration-200 shadow-brand disabled:opacity-50 text-sm flex items-center gap-2">
-            {generating ? (
-              <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Generating...
-              </>
-            ) : 'AI Generate Reminders'}
-          </button>
-        </div>
+    <AppShell>
+      <Head>
+        <title>Reminders · MediFlow</title>
+      </Head>
 
-        {error && (
-          <div className="bg-red-50/80 backdrop-blur border border-red-200/50 rounded-xl p-4 animate-slide-down">
-            <p className="text-sm text-red-700 font-medium">{error}</p>
-          </div>
-        )}
+      <PageHeader
+        eyebrow="Reminders"
+        title="Keep the plan visible."
+        description="Reminders are built from what is written in the record — a refill date, a follow-up, a visit. MediFlow does not know whether a dose was taken and never claims that it was."
+        meta={
+          <>
+            <span className="tag-neutral">{stats?.pending ?? 0} pending</span>
+            {stats && stats.overdue > 0 ? (
+              <span className="tag-crimson">{stats.overdue} overdue</span>
+            ) : (
+              <span className="font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+                Nothing overdue
+              </span>
+            )}
+            <span className="font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+              No email or SMS is sent
+            </span>
+          </>
+        }
+      />
 
-        {aiSummary && (
-          <div className="card-blur bg-gradient-to-r from-brand-50/80 to-medical-50/80 p-6 animate-slide-up">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-7 h-7 rounded-lg bg-brand-100 flex items-center justify-center">
-                <svg className="w-3.5 h-3.5 text-brand-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
+      {notice ? (
+        <Alert tone="info" title="Reminder update" className="mt-6">
+          {notice}
+        </Alert>
+      ) : null}
+
+      {remindersQuery.isError ? (
+        <Alert tone="danger" title="Could not load reminders" className="mt-6">
+          {errorMessage(remindersQuery.error)}
+        </Alert>
+      ) : null}
+
+      <section aria-label="Reminder summary" className="mt-8">
+        {statsQuery.isLoading ? (
+          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={index} className="h-20 w-full" />
+            ))}
+          </div>
+        ) : stats ? (
+          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+            <Stat value={stats.pending} label="Pending" accent={stats.overdue > 0 ? 'clay' : 'ink'} note="Still open" />
+            <Stat value={stats.overdue} label="Overdue" accent={stats.overdue > 0 ? 'crimson' : 'ink'} note="Past the due date" />
+            <Stat value={stats.acknowledged} label="Acknowledged" accent="pine" note="Seen and marked" />
+            <Stat value={stats.total} label="All reminders" note="Including dismissed" />
+          </div>
+        ) : null}
+      </section>
+
+      <div className="mt-12 grid gap-12 lg:grid-cols-[1.25fr_0.75fr] lg:gap-14">
+        <section aria-labelledby="list-heading">
+          <SectionHeading
+            number="01"
+            id="list-heading"
+            title="Recorded reminders"
+            description="Pending items stay here until acknowledged or deleted. A reminder is not evidence of a dose."
+            actions={
+              <div className="flex flex-wrap gap-1" role="group" aria-label="Filter reminders">
+                {FILTERS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={filter === option.value}
+                    onClick={() => setFilter(option.value)}
+                    className={
+                      filter === option.value
+                        ? 'border border-ink bg-ink px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.1em] text-paper'
+                        : 'border border-rule bg-surface px-3 py-1.5 font-mono text-2xs uppercase tracking-[0.1em] text-ink-soft hover:border-ink'
+                    }
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
-              <h3 className="font-semibold text-navy-900 text-sm">AI Companion Summary</h3>
-            </div>
-            <p className="text-sm text-navy-700">{aiSummary}</p>
-          </div>
-        )}
+            }
+          />
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {statCards.map((card, i) => (
-            <div key={card.label} className={`card-blur p-4 text-center animate-slide-up stagger-${i + 1}`}>
-              <p className={`text-3xl font-bold ${card.color}`}>{card.value}</p>
-              <p className="text-xs text-navy-500 mt-1 font-medium">{card.label}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex gap-2">
-          {['all', 'pending', 'overdue', 'acknowledged'].map(f => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200 ${
-                filter === f ? 'bg-brand-600 text-white shadow-brand' : 'bg-navy-100 text-navy-600 hover:bg-navy-200'
-              }`}>
-              {f.charAt(0).toUpperCase() + f.slice(1)}
-            </button>
-          ))}
-        </div>
-
-        {filteredReminders.length === 0 ? (
-          <div className="card-blur p-12 text-center animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-navy-100 flex items-center justify-center mx-auto mb-4">
-              <svg className="w-8 h-8 text-navy-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-              </svg>
-            </div>
-            <p className="text-navy-600 font-medium">No reminders to show</p>
-            <button onClick={handleGenerate} className="mt-4 px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold text-sm">
-              Generate AI Reminders
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {filteredReminders.map((rem, i) => {
-              const isOverdue = rem.status === 'Pending' && new Date(rem.dueDate) < new Date();
-              return (
-                <div key={rem.id}
-                  className={`card-blur p-4 animate-slide-up ${isOverdue ? 'border-l-4 border-l-red-400' : ''}`}
-                  style={{ animationDelay: `${i * 0.03}s` }}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-navy-50 flex items-center justify-center flex-shrink-0">
-                        <svg className="w-5 h-5 text-navy-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-                        </svg>
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h3 className="font-medium text-navy-900">{rem.title}</h3>
-                          <span className={getTypeColor(rem.reminderType)}>{rem.reminderType}</span>
-                          {isOverdue && <span className="badge-danger">Overdue</span>}
+          <div className="mt-5">
+            {remindersQuery.isLoading ? (
+              <div className="space-y-4">
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <Skeleton key={index} className="h-20 w-full" />
+                ))}
+              </div>
+            ) : filtered.length === 0 ? (
+              <EmptyState
+                title={filter === 'ALL' ? 'No reminders yet' : 'Nothing in this view'}
+                description="Generate reminders from the recorded plan, or add one by hand for something the plan does not capture."
+              />
+            ) : (
+              <ol className="divide-y divide-rule border-y border-rule">
+                {filtered.map((reminder) => {
+                  const overdue = isOverdue(reminder);
+                  return (
+                    <li key={reminder.id} className="py-5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="tag-neutral">{REMINDER_TYPE_LABELS[reminder.reminderType]}</span>
+                            <span className={STATUS_CLASS[reminder.status]}>
+                              {reminder.status.toLowerCase()}
+                            </span>
+                            {overdue ? <span className="tag-crimson">overdue</span> : null}
+                          </div>
+                          <h3 className="mt-2 font-display text-xl leading-tight text-ink">
+                            {reminder.title}
+                          </h3>
+                          {reminder.description ? (
+                            <p className="mt-1.5 text-sm leading-relaxed text-ink-soft">
+                              {reminder.description}
+                            </p>
+                          ) : null}
+                          <p className="mt-2 font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+                            Due {formatDate(reminder.dueDate)} · {relativeTime(reminder.dueDate)}
+                          </p>
                         </div>
-                        {rem.description && <p className="text-sm text-navy-600 mt-1">{rem.description}</p>}
-                        <p className="text-xs text-navy-400 mt-1">Due: {new Date(rem.dueDate).toLocaleDateString()}</p>
+                        <div className="flex flex-wrap gap-2">
+                          {reminder.status !== 'ACKNOWLEDGED' ? (
+                            <Button
+                              variant="quiet"
+                              onClick={() => acknowledge.mutate(reminder.id)}
+                              loading={acknowledge.isPending && acknowledge.variables === reminder.id}
+                            >
+                              Acknowledge
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="danger"
+                            onClick={() => askRemove(reminder)}
+                            loading={remove.isPending && remove.variables === reminder.id}
+                          >
+                            Delete
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex gap-2 flex-shrink-0">
-                      {rem.status === 'Pending' && (
-                        <button onClick={() => handleAcknowledge(rem.id)}
-                          className="px-3 py-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors border border-emerald-100">
-                          Acknowledge
-                        </button>
-                      )}
-                      <button onClick={() => handleDelete(rem.id)}
-                        className="px-3 py-1.5 text-xs font-semibold bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors border border-red-100">
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
           </div>
-        )}
+
+          <ClinicalDisclaimer className="mt-8 lg:hidden" />
+        </section>
+
+        <aside className="space-y-8">
+          <section className="border border-ink bg-surface p-5 sm:p-6" aria-labelledby="generate-heading">
+            <p className="eyebrow">From the record</p>
+            <h2 id="generate-heading" className="mt-1 font-display text-2xl text-ink">
+              Generate from the plan
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+              Looks at active medicine courses, upcoming visits and requests that may need a follow-up. It
+              creates only reminders that do not already exist.
+            </p>
+
+            {generate.isError ? (
+              <Alert tone="danger" title="Could not generate reminders" className="mt-4">
+                {errorMessage(generate.error)}
+              </Alert>
+            ) : null}
+
+            <Button className="mt-4 w-full" onClick={() => generate.mutate()} loading={generate.isPending}>
+              {generate.isPending ? 'Reading the plan' : 'Generate reminders'}
+            </Button>
+
+            {companion ? (
+              <div className="mt-5 border-t border-rule pt-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="eyebrow">Care engagement</p>
+                  <span
+                    className={
+                      {
+                        pine: 'tag-pine',
+                        ochre: 'tag-ochre',
+                        crimson: 'tag-crimson',
+                      }[scoreTone(companion.careEngagementScore)]
+                    }
+                  >
+                    {companion.careEngagementScore}/100
+                  </span>
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-ink-faint">{companion.scoreBasis}</p>
+
+                <p className="mt-4 text-sm leading-relaxed text-ink-soft">{companion.aiSummary}</p>
+                <ModeNote mode={companion.mode} className="mt-3" />
+
+                {companion.missedAppointments.length > 0 ? (
+                  <div className="mt-4 border-t border-rule pt-3">
+                    <p className="eyebrow">Recorded as missed</p>
+                    <ul className="mt-2 space-y-2 text-sm text-ink-soft">
+                      {companion.missedAppointments.map((missed) => (
+                        <li key={missed.appointmentId}>
+                          {formatDate(missed.date)} · {missed.providerName} — {missed.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {companion.reminders.length > 0 ? (
+                  <div className="mt-5">
+                    <p className="eyebrow">Suggested entries</p>
+                    <ul className="mt-2 divide-y divide-rule border-y border-rule">
+                      {companion.reminders.map((reminder) => (
+                        <li key={reminder.key} className="py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-ink">{reminder.title}</p>
+                            <span className={reminder.existing ? 'tag-neutral' : 'tag-pine'}>
+                              {reminder.existing ? 'already on file' : 'added'}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-ink-soft">
+                            {reminder.description}
+                          </p>
+                          <p className="mt-1 font-mono text-2xs uppercase tracking-[0.08em] text-ink-faint">
+                            {formatDate(reminder.dueDate)} · {reminder.priority.toLowerCase()} priority
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="border border-rule bg-paper p-5 sm:p-6" aria-labelledby="add-heading">
+            <p className="eyebrow">By hand</p>
+            <h2 id="add-heading" className="mt-1 font-display text-2xl text-ink">
+              Add a reminder
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+              Use this for something the record does not capture — a question to ask, or a date you do not
+              want to lose.
+            </p>
+
+            <form
+              className="mt-4 space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setFormError(null);
+                setNotice(null);
+                create.mutate();
+              }}
+            >
+              <SelectField
+                label="Type"
+                value={reminderType}
+                onChange={(event) => setReminderType(event.target.value as ReminderType)}
+              >
+                {REMINDER_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {REMINDER_TYPE_LABELS[type]}
+                  </option>
+                ))}
+              </SelectField>
+
+              <TextField
+                label="Title"
+                required
+                minLength={2}
+                maxLength={180}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="e.g. Ask about the new dose"
+              />
+
+              <TextField
+                label="Due date"
+                type="date"
+                required
+                min={todayInput()}
+                value={dueDate}
+                onChange={(event) => setDueDate(event.target.value)}
+              />
+
+              <TextAreaField
+                label="Note"
+                optional
+                rows={3}
+                maxLength={600}
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="Anything that will help you remember why this matters."
+              />
+
+              {formError ? (
+                <Alert tone="danger" title="Could not save">
+                  {formError}
+                </Alert>
+              ) : null}
+
+              <Button type="submit" loading={create.isPending} className="w-full">
+                Save reminder
+              </Button>
+
+              <p className="text-xs leading-relaxed text-ink-faint">
+                This stores the reminder in MediFlow only. It does not schedule a notification on your
+                phone.
+              </p>
+            </form>
+          </section>
+
+          <ClinicalDisclaimer />
+        </aside>
       </div>
-    </Layout>
+    </AppShell>
   );
 }

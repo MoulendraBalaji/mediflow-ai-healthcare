@@ -1,336 +1,645 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { useRouter } from 'next/router';
-import Layout from '../components/Layout';
-import { api } from '../lib/api';
+import Head from 'next/head';
+import Link from 'next/link';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { useRef, useState, type DragEvent } from 'react';
+import { AppShell } from '../components/AppShell';
+import { PatientScopeEmpty } from '../components/PatientScopeEmpty';
+import { Alert, ClinicalDisclaimer } from '../components/ui/Alert';
+import { Button, ButtonLink } from '../components/ui/Button';
+import { SelectField, TextAreaField, TextField } from '../components/ui/Field';
+import { EmptyState, PageHeader, SectionHeading } from '../components/ui/Layout';
+import { api, errorMessage, isApiError } from '../lib/api';
+import { formatDate, recordTypeLabel, todayInput } from '../lib/format';
+import type { ExtractedMedication, ExtractionResult, RecordType } from '../lib/types';
+import { usePatientScope } from '../lib/usePatientScope';
 
-interface ExtractedData {
-  medications: Array<{ name: string; dosage?: string; frequency?: string; indication?: string; prescribedBy?: string; startDate?: string }>;
-  allergies: string[];
-  diagnoses: string[];
-  encounters: Array<{ date?: string; type: string; description: string }>;
-  notes: string[];
-  vitalSigns?: Record<string, string>;
+const MAX_BYTES = 10 * 1024 * 1024;
+const ACCEPT = '.pdf,.png,.jpg,.jpeg,.txt,application/pdf,image/png,image/jpeg,text/plain';
+
+const RECORD_TYPES: RecordType[] = [
+  'PRESCRIPTION',
+  'LAB_REPORT',
+  'DISCHARGE_SUMMARY',
+  'IMAGING',
+  'ENCOUNTER',
+  'OTHER',
+];
+
+interface MedicationDraft extends ExtractedMedication {}
+
+interface ReviewState {
+  recordType: RecordType;
+  recordDate: string;
+  description: string;
+  facilityId: string;
+  providerId: string;
+  allergies: string;
+  diagnoses: string;
+  medications: MedicationDraft[];
 }
 
-interface PatientData { id: string; firstName: string; lastName: string; }
+function splitList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function confidenceTone(value: number): 'pine' | 'ochre' | 'clay' {
+  if (value >= 0.75) return 'pine';
+  if (value >= 0.5) return 'ochre';
+  return 'clay';
+}
+
+function ConfidenceRow({ label, value }: { label: string; value: number }) {
+  const tone = confidenceTone(value);
+  const bar = { pine: 'bg-pine', ochre: 'bg-ochre', clay: 'bg-clay' }[tone];
+  const text = { pine: 'text-pine', ochre: 'text-ochre', clay: 'text-clay' }[tone];
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">{label}</span>
+        <span className={`font-mono text-2xs ${text}`}>{Math.round(value * 100)}%</span>
+      </div>
+      <div className="mt-1 h-1 w-full bg-rule" role="presentation">
+        <div className={`h-1 ${bar}`} style={{ width: `${Math.round(value * 100)}%` }} />
+      </div>
+    </div>
+  );
+}
 
 export default function UploadPage() {
-  const router = useRouter();
-  const dropZoneRef = useRef<HTMLDivElement>(null);
-  const [patient, setPatient] = useState<PatientData | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileType, setFileType] = useState('Prescription');
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [extractedData, setExtractedData] = useState<ExtractedData | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [activityDuration, setActivityDuration] = useState<number | null>(null);
+  const { patientId, isStaff } = usePatientScope();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [recordType, setRecordType] = useState<RecordType>('PRESCRIPTION');
+  const [dragging, setDragging] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
+  const [review, setReview] = useState<ReviewState | null>(null);
+  const [savedId, setSavedId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const loadSession = async () => {
-      try {
-        const sessionResponse = await api.getSession();
-        const user = sessionResponse.data.user;
-        if (user.role !== 'PATIENT') { router.push('/login'); return; }
-        setPatient(user.patient);
-        setError(null);
-      } catch (err: any) {
-        setError('Failed to load session');
-        router.push('/login');
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadSession();
-  }, [router]);
+  const facilities = useQuery({
+    queryKey: ['facilities', 'upload'],
+    queryFn: () => api.facilities.list(),
+    staleTime: 60_000,
+  });
 
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true);
-    else if (e.type === 'dragleave') setDragActive(false);
-  };
+  const providers = useQuery({
+    queryKey: ['providers', 'upload'],
+    queryFn: () => api.providers.list(),
+    staleTime: 60_000,
+  });
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) setSelectedFile(e.dataTransfer.files[0]);
-  };
-
-  const handleUpload = async () => {
-    if (!selectedFile || !patient) { setError('Please select a file'); return; }
-    setUploading(true);
-    setError(null);
-    setExtractedData(null);
-    try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      formData.append('patientId', patient.id);
-      formData.append('recordType', fileType);
-      const response = await api.uploadMedicalRecord(formData);
-      if (response.data) {
-        setExtractedData(response.data.extractedData);
-        if (response.data.agentActivityId) {
-          try {
-            const activityResponse = await api.getActivityDetail(response.data.agentActivityId);
-            if (activityResponse.data.duration) setActivityDuration(activityResponse.data.duration);
-          } catch {}
-        }
-      }
-    } catch (err: any) {
-      setError(err.response?.data?.message || err.response?.data?.error || err.message || 'Upload failed');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleSave = async () => {
-    if (!extractedData || !patient) { setError('No data to save'); return; }
-    try {
-      setUploading(true);
-      setError(null);
-      await api.createRecord({
-        patientId: patient.id, recordType: fileType, recordDate: new Date().toISOString(),
-        description: extractedData.notes?.join('; ') || 'Uploaded medical record',
-        fileName: selectedFile?.name || 'unknown.pdf', extractedData, medications: extractedData.medications,
+  const extract = useMutation({
+    mutationFn: ({ selected, type }: { selected: File; type: RecordType }) =>
+      api.records.extract(selected, { patientId: patientId ?? undefined, recordType: type }),
+    onSuccess: (result) => {
+      setSavedId(null);
+      setExtraction(result.extraction);
+      const data = result.extraction.data;
+      setReview({
+        recordType: result.extraction.recordType,
+        recordDate: result.extraction.recordDate || todayInput(),
+        description: data?.diagnoses.length
+          ? `${recordTypeLabel(result.extraction.recordType)} — ${data.diagnoses.slice(0, 2).join(', ')}`
+          : `${recordTypeLabel(result.extraction.recordType)} uploaded ${formatDate(result.extraction.recordDate)}`,
+        facilityId: '',
+        providerId: '',
+        allergies: data?.allergies.join(', ') ?? '',
+        diagnoses: data?.diagnoses.join(', ') ?? '',
+        medications: data?.medications ?? [],
       });
-      router.push('/timeline');
-    } catch (err: any) {
-      setError(err.response?.data?.message || err.response?.data?.error || err.message || 'Failed to save');
-    } finally {
-      setUploading(false);
+    },
+  });
+
+  const save = useMutation({
+    mutationFn: () => {
+      if (!extraction || !review) throw new Error('Nothing to save');
+      const cleanedMedications = review.medications
+        .filter((medication) => medication.name.trim().length > 0)
+        .map((medication) => ({
+          name: medication.name.trim(),
+          dosage: medication.dosage,
+          frequency: medication.frequency,
+          indication: medication.indication,
+          prescribedBy: medication.prescribedBy,
+          startDate: medication.startDate,
+          endDate: medication.endDate,
+        }));
+
+      const extractedData = {
+        ...(extraction.data ?? {}),
+        allergies: splitList(review.allergies),
+        diagnoses: splitList(review.diagnoses),
+      };
+
+      return api.records.create({
+        patientId: patientId ?? undefined,
+        providerId: review.providerId || null,
+        facilityId: review.facilityId || undefined,
+        recordType: review.recordType,
+        recordDate: review.recordDate,
+        description: review.description.trim(),
+        fileName: extraction.fileName,
+        extractedData,
+        medications: cleanedMedications,
+      });
+    },
+    onSuccess: (result) => {
+      setSavedId(result.record.id);
+      setExtraction(null);
+      setReview(null);
+      setFile(null);
+    },
+  });
+
+  if (!patientId) return <PatientScopeEmpty />;
+
+  const chooseFile = (candidate: File | undefined) => {
+    setLocalError(null);
+    setSavedId(null);
+    extract.reset();
+    if (!candidate) return;
+    if (candidate.size > MAX_BYTES) {
+      setLocalError('That file is larger than 10 MB. Please compress it or split it.');
+      return;
     }
+    const lower = candidate.name.toLowerCase();
+    const accepted =
+      lower.endsWith('.pdf') ||
+      lower.endsWith('.png') ||
+      lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.txt') ||
+      ['application/pdf', 'image/png', 'image/jpeg', 'text/plain'].includes(candidate.type);
+    if (!accepted) {
+      setLocalError('Use a PDF, PNG, JPEG or plain-text file. Other formats can carry hidden content.');
+      return;
+    }
+    setFile(candidate);
+    setExtraction(null);
+    setReview(null);
   };
 
-  if (loading) {
-    return (
-      <Layout>
-        <div className="flex items-center justify-center min-h-[60vh]">
-          <div className="w-12 h-12 border-3 border-brand-200 border-t-brand-600 rounded-full animate-spin" />
-        </div>
-      </Layout>
+  const onDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragging(false);
+    chooseFile(event.dataTransfer.files?.[0]);
+  };
+
+  const updateMedication = (index: number, key: keyof MedicationDraft, value: string) => {
+    setReview((current) => {
+      if (!current) return current;
+      const next = current.medications.map((medication, position) =>
+        position === index ? { ...medication, [key]: value } : medication
+      );
+      return { ...current, medications: next };
+    });
+  };
+
+  const addMedication = () => {
+    setReview((current) =>
+      current
+        ? {
+            ...current,
+            medications: [
+              ...current.medications,
+              {
+                name: '',
+                dosage: '',
+                frequency: '',
+                indication: '',
+                prescribedBy: '',
+                startDate: '',
+                endDate: '',
+              },
+            ],
+          }
+        : current
     );
-  }
+  };
+
+  const removeMedication = (index: number) => {
+    setReview((current) =>
+      current ? { ...current, medications: current.medications.filter((_, position) => position !== index) } : current
+    );
+  };
+
+  const reset = () => {
+    setFile(null);
+    setExtraction(null);
+    setReview(null);
+    setLocalError(null);
+    extract.reset();
+    save.reset();
+    if (inputRef.current) inputRef.current.value = '';
+  };
+
+  const extractionError = extract.error;
+  const extractionErrorCode = isApiError(extractionError) ? extractionError.code : null;
 
   return (
-    <Layout patientName={patient ? `${patient.firstName} ${patient.lastName}` : ''} patientId={patient?.id}>
-      <div className="max-w-4xl mx-auto space-y-8">
-        <div className="animate-slide-up">
-          <h1 className="text-3xl font-bold text-navy-900 tracking-tight">Upload Medical Records</h1>
-          <p className="text-navy-500 mt-1">
-            Upload PDF, TXT, or image files. Our AI will automatically extract and organize the information.
+    <AppShell>
+      <Head>
+        <title>Add a document · MediFlow</title>
+      </Head>
+
+      <PageHeader
+        eyebrow="Intake"
+        title="Add a document. Review every field."
+        description="MediFlow reads the file, then shows you what it found before anything is saved. If a field cannot be read, it is left empty rather than guessed."
+        meta={
+          <>
+            <span className="tag-neutral">PDF · PNG · JPEG · TXT</span>
+            <span className="tag-neutral">Max 10 MB</span>
+            <span className="font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+              One file at a time
+            </span>
+          </>
+        }
+      />
+
+      {savedId ? (
+        <Alert tone="success" title="Saved to the record" className="mt-6">
+          The reviewed document is now part of this patient’s record.{' '}
+          <Link href={isStaff ? `/timeline?patientId=${patientId}` : '/timeline'} className="btn-link text-sm">
+            Open the timeline
+          </Link>{' '}
+          or{' '}
+          <button type="button" onClick={reset} className="btn-link text-sm">
+            add another document
+          </button>
+          .
+        </Alert>
+      ) : null}
+
+      {localError ? (
+        <Alert tone="danger" title="That file cannot be used" className="mt-6">
+          {localError}
+        </Alert>
+      ) : null}
+
+      {extractionError ? (
+        <Alert tone="danger" title="Extraction did not complete" className="mt-6">
+          <p>{errorMessage(extractionError)}</p>
+          <p className="mt-2 text-xs text-ink-faint">
+            Nothing was saved and no clinical values were invented. You can try a sharper photo, a
+            text-based PDF, or enter the document manually with your clinic.
+            {extractionErrorCode === 'EXTRACTION_UNAVAILABLE'
+              ? ' The document reader is currently unavailable; this is an infrastructure limit, not a reading of your file.'
+              : ''}
           </p>
-        </div>
+        </Alert>
+      ) : null}
 
-        {error && (
-          <div className="bg-red-50/80 backdrop-blur border border-red-200/50 rounded-xl p-4 animate-slide-down">
-            <p className="text-sm text-red-700 font-medium">{error}</p>
-          </div>
-        )}
+      <div className="mt-8 grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
+        {/* Upload panel */}
+        <section aria-labelledby="upload-heading">
+          <SectionHeading
+            number="01"
+            id="upload-heading"
+            title="Choose the file"
+            description="The file type is checked from its contents, not just its name."
+          />
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="card-blur p-6 animate-slide-up">
-              <label className="block text-sm font-semibold text-navy-700 mb-2">Record Type</label>
-              <select value={fileType} onChange={(e) => setFileType(e.target.value)} className="input-solid">
-                <option value="Prescription">Prescription</option>
-                <option value="Lab Report">Lab Report</option>
-                <option value="Discharge Summary">Discharge Summary</option>
-                <option value="Imaging">Imaging Report</option>
-                <option value="Encounter">Encounter Note</option>
-              </select>
-            </div>
-
-            <div
-              ref={dropZoneRef}
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-              className={`card-blur border-2 border-dashed p-12 text-center cursor-pointer transition-all duration-300 ${
-                dragActive
-                  ? 'border-brand-500 bg-brand-50/50 scale-[1.02]'
-                  : selectedFile
-                    ? 'border-emerald-400 bg-emerald-50/30'
-                    : 'border-navy-200 hover:border-navy-300 hover:bg-navy-50/30'
-              }`}
+          <div className="mt-5 grid gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
+            <SelectField
+              label="Document type"
+              value={recordType}
+              onChange={(event) => setRecordType(event.target.value as RecordType)}
+              hint="Used to prompt the reader. It does not change what is extracted."
             >
-              {selectedFile ? (
-                <div className="animate-scale-in">
-                  <div className="w-16 h-16 rounded-2xl bg-emerald-100 flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                  </div>
-                  <p className="text-sm font-semibold text-navy-900">{selectedFile.name}</p>
-                  <p className="text-xs text-navy-400 mt-1">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                  <button type="button" onClick={() => setSelectedFile(null)} className="text-xs text-brand-600 hover:text-brand-700 mt-3 font-semibold underline">
-                    Choose different file
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="w-16 h-16 rounded-2xl bg-brand-50 flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                  </div>
-                  <p className="text-navy-900 font-semibold mb-1">Drag and drop your file here</p>
-                  <p className="text-sm text-navy-400 mb-4">or click to browse</p>
-                  <p className="text-xs text-navy-300 mb-4">Supported: PDF, TXT, JPG, PNG (max 10MB)</p>
-                  <input type="file" onChange={(e) => e.target.files && setSelectedFile(e.target.files[0])} className="hidden" id="fileInput" accept=".pdf,.txt,.jpg,.jpeg,.png" />
-                  <label htmlFor="fileInput" className="inline-flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl text-sm font-semibold hover:from-brand-700 hover:to-brand-800 cursor-pointer transition-all duration-200 shadow-brand hover:shadow-lg">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                    Select File
-                  </label>
-                </>
-              )}
-            </div>
+              {RECORD_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {recordTypeLabel(type)}
+                </option>
+              ))}
+            </SelectField>
+            <Button
+              variant="primary"
+              onClick={() => file && extract.mutate({ selected: file, type: recordType })}
+              loading={extract.isPending}
+              disabled={!file}
+            >
+              {extract.isPending ? 'Reading document' : 'Read document'}
+            </Button>
+          </div>
 
-            {selectedFile && !extractedData && (
-              <button onClick={handleUpload} disabled={uploading}
-                className="w-full py-3.5 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:from-brand-700 hover:to-brand-800 transition-all duration-200 shadow-brand disabled:opacity-50 flex items-center justify-center gap-2">
-                {uploading ? (
-                  <>
-                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Processing...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    Process with AI
-                  </>
-                )}
+          <div
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            className={`mt-5 border border-dashed p-8 text-center transition-colors ${
+              dragging ? 'border-pine bg-pine-light' : 'border-rule-strong bg-surface'
+            }`}
+          >
+            <p className="font-display text-xl text-ink">
+              {file ? file.name : 'Drop a document here'}
+            </p>
+            <p className="mt-2 text-sm text-ink-soft">
+              {file
+                ? `${(file.size / 1024).toFixed(0)} KB selected. Nothing has been sent yet.`
+                : 'A prescription, lab report, discharge summary or a clear photograph of one.'}
+            </p>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              <button type="button" className="btn-quiet" onClick={() => inputRef.current?.click()}>
+                {file ? 'Choose a different file' : 'Browse files'}
               </button>
-            )}
+              {file ? (
+                <Button variant="quiet" onClick={() => extract.mutate({ selected: file, type: recordType })}>
+                  Send for reading
+                </Button>
+              ) : null}
+            </div>
+            <input
+              ref={inputRef}
+              type="file"
+              accept={ACCEPT}
+              className="sr-only"
+              onChange={(event) => chooseFile(event.target.files?.[0])}
+            />
+          </div>
 
-            {extractedData && (
-              <div className="space-y-6 animate-slide-up">
-                {activityDuration && (
-                  <div className="card-blur bg-brand-50/50 p-4 flex items-center gap-3">
-                    <svg className="w-5 h-5 text-brand-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    <p className="text-sm text-navy-700">
-                      <strong>Intake Agent</strong> processed in <strong>{(activityDuration / 1000).toFixed(2)}</strong> seconds
-                    </p>
-                  </div>
-                )}
+          <p className="mt-3 text-xs leading-relaxed text-ink-faint">
+            Files are processed in memory for extraction. The API does not write to the database until you
+            review and save. Password-protected or damaged PDFs are rejected by name, not silently skipped.
+          </p>
+        </section>
 
-                {extractedData.medications?.length > 0 && (
-                  <div className="card-blur p-6">
-                    <h3 className="font-semibold text-navy-900 mb-4 flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-blue-100 flex items-center justify-center">
-                        <svg className="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                        </svg>
-                      </div>
-                      Medications
-                    </h3>
-                    <div className="space-y-3">
-                      {extractedData.medications.map((med, idx) => (
-                        <div key={idx} className="border-l-4 border-brand-400 pl-4 py-2">
-                          <p className="font-semibold text-navy-900">{med.name}</p>
-                          {med.dosage && <p className="text-sm text-navy-600">Dosage: {med.dosage}</p>}
-                          {med.frequency && <p className="text-sm text-navy-600">Frequency: {med.frequency}</p>}
-                          {med.indication && <p className="text-sm text-navy-500">For: {med.indication}</p>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+        {/* Result panel */}
+        <section aria-labelledby="result-heading">
+          <SectionHeading
+            number="02"
+            id="result-heading"
+            title="Review what was read"
+            description="Every field below came from the document. Edit anything that is wrong before saving."
+          />
 
-                {extractedData.allergies?.length > 0 && (
-                  <div className="card-blur p-6">
-                    <h3 className="font-semibold text-navy-900 mb-4 flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-red-100 flex items-center justify-center">
-                        <svg className="w-3.5 h-3.5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                        </svg>
-                      </div>
-                      Allergies
-                    </h3>
-                    <div className="flex flex-wrap gap-2">
-                      {extractedData.allergies.map((allergy, idx) => (
-                        <span key={idx} className="badge-danger">{allergy}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+          {!extraction && !extract.isPending ? (
+            <div className="mt-5">
+              <EmptyState
+                title="Nothing read yet"
+                description="Choose a file and select “Read document”. The extraction preview appears here."
+              />
+            </div>
+          ) : null}
 
-                {extractedData.diagnoses?.length > 0 && (
-                  <div className="card-blur p-6">
-                    <h3 className="font-semibold text-navy-900 mb-4 flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-lg bg-purple-100 flex items-center justify-center">
-                        <svg className="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                        </svg>
-                      </div>
-                      Diagnoses
-                    </h3>
-                    <div className="flex flex-wrap gap-2">
-                      {extractedData.diagnoses.map((diag, idx) => (
-                        <span key={idx} className="badge-brand">{diag}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+          {extract.isPending ? (
+            <div className="mt-5 border border-rule bg-surface p-6">
+              <p className="font-display text-xl text-ink">Reading the document…</p>
+              <p className="mt-2 text-sm text-ink-soft">
+                Text-based PDFs and plain text go through the document reader. Images go through the vision
+                reader. A model is only used when a key is configured.
+              </p>
+            </div>
+          ) : null}
 
-                <div className="flex gap-3">
-                  <button onClick={handleSave} disabled={uploading}
-                    className="flex-1 py-3.5 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-xl font-semibold hover:from-emerald-600 hover:to-emerald-700 transition-all duration-200 shadow-lg disabled:opacity-50 flex items-center justify-center gap-2">
-                    {uploading ? 'Saving...' : 'Save to Timeline'}
-                  </button>
-                  <button onClick={() => { setExtractedData(null); setSelectedFile(null); setActivityDuration(null); }}
-                    className="flex-1 py-3.5 bg-navy-100 text-navy-700 rounded-xl font-semibold hover:bg-navy-200 transition-all duration-200">
-                    Cancel
-                  </button>
+          {extraction ? (
+            <div className="mt-5 space-y-5">
+              {extraction.demo ? (
+                <Alert tone="warning" title="Demo mode — not your document">
+                  {extraction.message ||
+                    'This is sample data produced by DEMO_MODE. It is not a reading of the file you selected.'}
+                </Alert>
+              ) : null}
+
+              {extraction.needsOcr ? (
+                <Alert tone="warning" title="This document needs OCR">
+                  <p>{extraction.message}</p>
+                  <p className="mt-2 text-xs text-ink-faint">
+                    No medicines, allergies or diagnoses have been created. Try a text-based PDF or a clear
+                    photograph instead.
+                  </p>
+                </Alert>
+              ) : null}
+
+              <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-y border-rule py-4">
+                <div>
+                  <dt className="data-key">File</dt>
+                  <dd className="data-value break-all">{extraction.fileName}</dd>
                 </div>
+                <div>
+                  <dt className="data-key">Reader</dt>
+                  <dd className="data-value">{extraction.extractor}</dd>
+                </div>
+                <div>
+                  <dt className="data-key">Document date</dt>
+                  <dd className="data-value">{formatDate(extraction.recordDate)}</dd>
+                </div>
+                <div>
+                  <dt className="data-key">Pages</dt>
+                  <dd className="data-value">{extraction.pages ?? 'Not applicable'}</dd>
+                </div>
+                <div>
+                  <dt className="data-key">Clinician on document</dt>
+                  <dd className="data-value">{extraction.providerName || 'Not recorded'}</dd>
+                </div>
+                <div>
+                  <dt className="data-key">Facility on document</dt>
+                  <dd className="data-value">{extraction.facilityName || 'Not recorded'}</dd>
+                </div>
+              </dl>
+
+              <div>
+                <p className="eyebrow">Field confidence</p>
+                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                  <ConfidenceRow label="Medicines" value={extraction.confidence.medications} />
+                  <ConfidenceRow label="Allergies" value={extraction.confidence.allergies} />
+                  <ConfidenceRow label="Diagnoses" value={extraction.confidence.diagnoses} />
+                  <ConfidenceRow label="Encounters" value={extraction.confidence.encounters} />
+                  <ConfidenceRow label="Notes" value={extraction.confidence.notes} />
+                  <ConfidenceRow label="Overall" value={extraction.confidence.overall} />
+                </div>
+                <p className="mt-2 text-xs text-ink-faint">
+                  Confidence is the reader’s own estimate of legibility, not a clinical certainty score.
+                </p>
               </div>
-            )}
-          </div>
 
-          <div className="space-y-6">
-            <div className="card-blur bg-gradient-to-br from-brand-50/50 to-medical-50/50 p-6 animate-slide-up">
-              <h3 className="font-semibold text-navy-900 mb-3 flex items-center gap-2">
-                <svg className="w-4 h-4 text-brand-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                Tips
-              </h3>
-              <ul className="space-y-2 text-xs text-navy-600">
-                <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">✓</span> Upload clear, legible documents</li>
-                <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">✓</span> Select the correct document type</li>
-                <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">✓</span> Our AI will extract key information</li>
-                <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">✓</span> Review extracted data before saving</li>
-                <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">✓</span> All uploads are confidential</li>
-              </ul>
-            </div>
+              {extraction.status === 'ok' && review ? (
+                <form
+                  className="space-y-5 border-t border-ink pt-5"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    save.mutate();
+                  }}
+                >
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <SelectField
+                      label="Record type"
+                      value={review.recordType}
+                      onChange={(event) =>
+                        setReview({ ...review, recordType: event.target.value as RecordType })
+                      }
+                    >
+                      {RECORD_TYPES.map((type) => (
+                        <option key={type} value={type}>
+                          {recordTypeLabel(type)}
+                        </option>
+                      ))}
+                    </SelectField>
+                    <TextField
+                      label="Document date"
+                      type="date"
+                      required
+                      value={review.recordDate}
+                      onChange={(event) => setReview({ ...review, recordDate: event.target.value })}
+                    />
+                  </div>
 
-            <div className="card-blur bg-gradient-to-br from-blue-50/50 to-cyan-50/50 p-6 animate-slide-up">
-              <h3 className="font-semibold text-navy-900 mb-3 flex items-center gap-2">
-                <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                File Types
-              </h3>
-              <ul className="space-y-2 text-xs text-navy-600">
-                <li><strong>Prescription:</strong> Medication details</li>
-                <li><strong>Lab Report:</strong> Test results & values</li>
-                <li><strong>Discharge:</strong> Hospital summaries</li>
-                <li><strong>Imaging:</strong> Scan reports</li>
-                <li><strong>Encounter:</strong> Visit notes</li>
-              </ul>
+                  <TextAreaField
+                    label="Description"
+                    required
+                    minLength={2}
+                    maxLength={2000}
+                    value={review.description}
+                    onChange={(event) => setReview({ ...review, description: event.target.value })}
+                    hint="A short, factual description. Avoid adding a diagnosis that is not in the document."
+                  />
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <TextField
+                      label="Allergies on document"
+                      value={review.allergies}
+                      onChange={(event) => setReview({ ...review, allergies: event.target.value })}
+                      hint="Comma-separated. Leave blank if none were printed."
+                    />
+                    <TextField
+                      label="Diagnoses on document"
+                      value={review.diagnoses}
+                      onChange={(event) => setReview({ ...review, diagnoses: event.target.value })}
+                      hint="Comma-separated. Do not add a diagnosis that is not written."
+                    />
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <SelectField
+                      label="Facility"
+                      value={review.facilityId}
+                      onChange={(event) => setReview({ ...review, facilityId: event.target.value })}
+                      hint="Leave blank to match the printed name, or fall back to the default facility."
+                    >
+                      <option value="">Match from document / default</option>
+                      {facilities.data?.facilities.map((facility) => (
+                        <option key={facility.id} value={facility.id}>
+                          {facility.name}
+                        </option>
+                      ))}
+                    </SelectField>
+                    <SelectField
+                      label="Clinician"
+                      value={review.providerId}
+                      onChange={(event) => setReview({ ...review, providerId: event.target.value })}
+                      hint="Leave blank to match the printed name, or use the signed-in clinician."
+                    >
+                      <option value="">Match from document</option>
+                      {providers.data?.providers.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          Dr. {provider.firstName} {provider.lastName} · {provider.specialty}
+                        </option>
+                      ))}
+                    </SelectField>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-3 border-b border-rule pb-2">
+                      <p className="eyebrow">Medicines</p>
+                      <Button type="button" variant="quiet" onClick={addMedication}>
+                        Add medicine
+                      </Button>
+                    </div>
+
+                    {review.medications.length === 0 ? (
+                      <p className="mt-3 text-sm text-ink-faint">
+                        No medicines were extracted. You can add one if the document contains a prescription
+                        that was missed, but only copy what is printed.
+                      </p>
+                    ) : (
+                      <div className="mt-3 space-y-4">
+                        {review.medications.map((medication, index) => (
+                          <fieldset key={index} className="border border-rule p-3">
+                            <legend className="px-2 font-mono text-2xs uppercase tracking-[0.1em] text-ink-faint">
+                              Medicine {index + 1}
+                            </legend>
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <label className="block">
+                                <span className="field-label">Name</span>
+                                <input
+                                  className="field"
+                                  value={medication.name}
+                                  onChange={(event) => updateMedication(index, 'name', event.target.value)}
+                                  placeholder="Exactly as printed"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="field-label">Dose</span>
+                                <input
+                                  className="field"
+                                  value={medication.dosage ?? ''}
+                                  onChange={(event) => updateMedication(index, 'dosage', event.target.value)}
+                                  placeholder="e.g. 500 mg"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="field-label">Directions</span>
+                                <input
+                                  className="field"
+                                  value={medication.frequency ?? ''}
+                                  onChange={(event) => updateMedication(index, 'frequency', event.target.value)}
+                                  placeholder="e.g. twice daily with meals"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="field-label">Recorded for</span>
+                                <input
+                                  className="field"
+                                  value={medication.indication ?? ''}
+                                  onChange={(event) => updateMedication(index, 'indication', event.target.value)}
+                                  placeholder="Only if printed"
+                                />
+                              </label>
+                            </div>
+                            <div className="mt-3 flex justify-end">
+                              <button
+                                type="button"
+                                className="text-xs font-semibold text-crimson underline decoration-rule-strong underline-offset-4 hover:decoration-crimson"
+                                onClick={() => removeMedication(index)}
+                              >
+                                Remove this medicine
+                              </button>
+                            </div>
+                          </fieldset>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {save.isError ? (
+                    <Alert tone="danger" title="Could not save">
+                      {errorMessage(save.error)}
+                    </Alert>
+                  ) : null}
+
+                  <div className="flex flex-wrap items-center gap-3 border-t border-rule pt-5">
+                    <Button type="submit" loading={save.isPending}>
+                      {save.isPending ? 'Saving review' : 'Save to record'}
+                    </Button>
+                    <Button type="button" variant="quiet" onClick={reset}>
+                      Discard and start over
+                    </Button>
+                    <p className="text-xs text-ink-faint">Saving writes the record and its medicines together.</p>
+                  </div>
+                </form>
+              ) : null}
+
+              <ClinicalDisclaimer />
             </div>
-          </div>
-        </div>
+          ) : null}
+        </section>
       </div>
-    </Layout>
+    </AppShell>
   );
 }
