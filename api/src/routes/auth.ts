@@ -1,176 +1,283 @@
-import { Router, Request, Response } from 'express';
-import { prisma } from '../index.js';
-import { hashPassword, verifyPassword, generateToken } from '../utils/auth.js';
-import { authMiddleware, AuthRequest } from '../middleware/auth.js';
+import { Router } from 'express';
+import { z } from 'zod';
+import { Gender, Role } from '@prisma/client';
+import { prisma } from '../lib/prisma.js';
+import { asyncHandler, HttpError, ok, parseBody, setNoStore } from '../lib/http.js';
+import { authMiddleware } from '../middleware/auth.js';
+import {
+  burnPasswordComparison,
+  clearAuthCookies,
+  extractRefreshToken,
+  generateAccessToken,
+  generateRefreshToken,
+  hashPassword,
+  publicUser,
+  setAuthCookies,
+  verifyPassword,
+  verifyRefreshToken,
+  type TokenPayload,
+} from '../utils/auth.js';
+import { audit } from '../lib/audit.js';
 
 const router = Router();
 
-// Register endpoint
-router.post('/register', async (req: Request, res: Response) => {
-  try {
-    const { email, password, name, role, firstName, lastName, dateOfBirth, gender } = req.body;
+const emailSchema = z.string().trim().toLowerCase().email('Enter a valid email address').max(254);
 
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'Missing required fields' });
+const passwordSchema = z
+  .string()
+  .min(8, 'Use at least 8 characters')
+  .max(72, 'That password is too long');
+
+const registerSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+  name: z.string().trim().min(2, 'Tell us your name').max(120).optional(),
+  firstName: z.string().trim().min(1).max(80).optional(),
+  lastName: z.string().trim().max(80).optional(),
+  dateOfBirth: z
+    .string()
+    .trim()
+    .refine((value) => !Number.isNaN(new Date(value).getTime()), 'Enter a valid date of birth')
+    .refine((value) => new Date(value) < new Date(), 'Date of birth must be in the past'),
+  gender: z.nativeEnum(Gender).default(Gender.OTHER),
+  contactNumber: z.string().trim().max(40).optional(),
+  role: z.string().optional(),
+});
+
+const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'Enter your password').max(200),
+});
+
+function tokenPayload(user: {
+  id: string;
+  email: string;
+  role: Role;
+  patientId: string | null;
+  providerId: string | null;
+}): TokenPayload {
+  return {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    patientId: user.patientId,
+    providerId: user.providerId,
+  };
+}
+
+function issueCookies(
+  res: Parameters<typeof setAuthCookies>[0],
+  user: {
+    id: string;
+    email: string;
+    role: Role;
+    patientId: string | null;
+    providerId: string | null;
+  }
+): void {
+  const payload = tokenPayload(user);
+  setAuthCookies(res, generateAccessToken(payload), generateRefreshToken(payload));
+}
+
+const userInclude = {
+  patient: {
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      dateOfBirth: true,
+      gender: true,
+      email: true,
+      contactNumber: true,
+      address: true,
+    },
+  },
+  provider: {
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      specialty: true,
+      email: true,
+      contactNumber: true,
+      facility: { select: { id: true, name: true, facilityType: true, address: true } },
+    },
+  },
+} as const;
+
+/** POST /api/auth/register — patients only. Staff accounts are provisioned by an admin. */
+router.post(
+  '/register',
+  asyncHandler(async (req, res) => {
+    const body = parseBody(registerSchema, req);
+    setNoStore(res);
+
+    if (body.role && body.role.toUpperCase() !== 'PATIENT') {
+      throw new HttpError(
+        403,
+        'SELF_REGISTRATION_FORBIDDEN',
+        'Clinician and admin accounts are created by an administrator, not by self-registration.'
+      );
     }
 
-    // Check if user exists
-    const existingUser = await prisma.user.findUnique({
-      where: { email },
-    });
+    const firstName = body.firstName ?? body.name?.split(' ')[0] ?? '';
+    const lastName = body.lastName ?? body.name?.split(' ').slice(1).join(' ') ?? '';
+    if (!firstName) throw new HttpError(422, 'VALIDATION_ERROR', 'Tell us your name');
 
-    if (existingUser) {
-      return res.status(400).json({ error: 'User already exists' });
+    const existing = await prisma.user.findUnique({ where: { email: body.email }, select: { id: true } });
+    if (existing) {
+      throw new HttpError(409, 'ALREADY_EXISTS', 'An account with that email already exists');
     }
 
-    // Hash password
-    const hashedPassword = hashPassword(password);
+    const password = await hashPassword(body.password);
 
-    // Create user and patient/provider
-    let user: any;
-
-    if (role === 'PATIENT') {
-      const patient = await prisma.patient.create({
+    const user = await prisma.$transaction(async (tx) => {
+      const patient = await tx.patient.create({
         data: {
-          firstName: firstName || name.split(' ')[0],
-          lastName: lastName || name.split(' ')[1] || '',
-          email,
-          dateOfBirth: new Date(dateOfBirth),
-          gender: gender || 'Other',
+          firstName,
+          lastName,
+          dateOfBirth: new Date(body.dateOfBirth),
+          gender: body.gender,
+          email: body.email,
+          contactNumber: body.contactNumber ?? null,
         },
+        select: { id: true },
       });
 
-      user = await prisma.user.create({
+      return tx.user.create({
         data: {
-          email,
-          password: hashedPassword,
-          name,
+          email: body.email,
+          password,
+          name: [firstName, lastName].filter(Boolean).join(' '),
           role: 'PATIENT',
           patientId: patient.id,
         },
+        include: userInclude,
       });
-    } else if (role === 'DOCTOR') {
-      // For doctors, we need specialty and facility info
-      return res.status(400).json({ error: 'Doctor registration not yet implemented' });
-    }
-
-    const token = generateToken(user.id, user.email, user.role);
-
-    res.json({
-      message: 'Registration successful',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-      },
     });
-  } catch (error: any) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: 'Registration failed', message: error.message });
-  }
-});
 
-// Login endpoint
-router.post('/login', async (req: Request, res: Response) => {
-  try {
-    const { email, password } = req.body;
+    issueCookies(res, user);
+    audit(req, 'AUTH_REGISTER', 'USER', user.patientId, { role: user.role });
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
+    return res.status(201).json({
+      data: { user: { ...publicUser(user), patient: user.patient, provider: null } },
+    });
+  })
+);
+
+/** POST /api/auth/login */
+router.post(
+  '/login',
+  asyncHandler(async (req, res) => {
+    const body = parseBody(loginSchema, req);
+    setNoStore(res);
 
     const user = await prisma.user.findUnique({
-      where: { email },
-      include: {
-        patient: true,
-        provider: true,
-      },
+      where: { email: body.email },
+      include: userInclude,
     });
 
     if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      await burnPasswordComparison(body.password);
+      throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
     }
 
-    const passwordMatch = verifyPassword(password, user.password);
-    if (!passwordMatch) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    const valid = await verifyPassword(body.password, user.password);
+    if (!valid) {
+      throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
     }
 
-    const token = generateToken(user.id, user.email, user.role);
+    if (user.disabledAt) {
+      throw new HttpError(403, 'ACCOUNT_DISABLED', 'This account has been disabled. Contact support.');
+    }
 
-    res.json({
-      message: 'Login successful',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        patientId: user.patientId,
-        providerId: user.providerId,
-      },
+    issueCookies(res, user);
+    audit(req, 'AUTH_LOGIN', 'USER', user.patientId);
+
+    return ok(res, {
+      user: { ...publicUser(user), patient: user.patient, provider: user.provider },
     });
-  } catch (error: any) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Login failed', message: error.message });
-  }
-});
+  })
+);
 
-// Forgot password endpoint
-router.post('/forgot-password', async (req: Request, res: Response) => {
-  try {
-    const { email } = req.body;
+/** POST /api/auth/refresh — rotates both cookies using the refresh cookie. */
+router.post(
+  '/refresh',
+  asyncHandler(async (req, res) => {
+    setNoStore(res);
+    const token = extractRefreshToken(req);
+    if (!token) throw new HttpError(401, 'UNAUTHORIZED', 'Please sign in again');
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
+    const payload = verifyRefreshToken(token);
+    if (!payload) {
+      clearAuthCookies(res);
+      throw new HttpError(401, 'TOKEN_EXPIRED', 'Your session has expired. Please sign in again.');
     }
 
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { id: payload.userId },
+      include: userInclude,
     });
 
-    // Always return success to prevent email enumeration
-    res.json({
-      message: 'If an account exists with this email, you will receive a password reset link shortly.',
-    });
-  } catch (error: any) {
-    console.error('Forgot password error:', error);
-    res.status(500).json({ error: 'Failed to process request' });
-  }
-});
-
-// Session endpoint - verify token
-router.get('/session', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.user?.userId },
-      include: {
-        patient: true,
-        provider: true,
-      },
-    });
-
-    if (!user) {
-      return res.status(401).json({ error: 'User not found' });
+    if (!user || user.disabledAt) {
+      clearAuthCookies(res);
+      throw new HttpError(401, 'UNAUTHORIZED', 'Please sign in again');
     }
 
-    res.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        patientId: user.patientId,
-        providerId: user.providerId,
-        patient: user.patient,
-        provider: user.provider,
-      },
+    issueCookies(res, user);
+    return ok(res, {
+      user: { ...publicUser(user), patient: user.patient, provider: user.provider },
     });
-  } catch (error: any) {
-    res.status(500).json({ error: 'Session retrieval failed', message: error.message });
-  }
+  })
+);
+
+/** POST /api/auth/logout */
+router.post('/logout', (req, res) => {
+  clearAuthCookies(res);
+  setNoStore(res);
+  audit(req, 'AUTH_LOGOUT', 'USER');
+  return ok(res, { signedOut: true });
 });
+
+/** GET /api/auth/session */
+router.get(
+  '/session',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    setNoStore(res);
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      include: userInclude,
+    });
+
+    if (!user || user.disabledAt) {
+      clearAuthCookies(res);
+      throw new HttpError(401, 'UNAUTHORIZED', 'Please sign in again');
+    }
+
+    return ok(res, {
+      user: { ...publicUser(user), patient: user.patient, provider: user.provider },
+    });
+  })
+);
+
+/**
+ * POST /api/auth/forgot-password
+ * Always generic: no account enumeration, and no email is actually sent in this
+ * build. The response states that clearly instead of pretending.
+ */
+router.post(
+  '/forgot-password',
+  asyncHandler(async (req, res) => {
+    const body = parseBody(z.object({ email: emailSchema }), req);
+    setNoStore(res);
+    void body;
+    return ok(res, {
+      accepted: true,
+      message:
+        'If an account exists for that address, a reset link will be sent. Email delivery is not enabled in this deployment.',
+    });
+  })
+);
 
 export default router;

@@ -1,771 +1,642 @@
+/**
+ * Development seed for MediFlow.
+ *
+ * - Reads DEMO_PASSWORD (falls back to a local-only default and warns).
+ * - Never prints passwords.
+ * - All dates are stored as UTC; appointmentDate is midnight UTC and
+ *   appointmentTime is canonical 24h "HH:mm".
+ */
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
-async function main() {
-  console.log('🌱 Seeding database...');
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? 'demo1234';
+const usingFallbackPassword = !process.env.DEMO_PASSWORD;
 
-  // Clear existing data
-  await prisma.agentActivity.deleteMany();
-  await prisma.reminder.deleteMany();
+const DAY_MS = 24 * 60 * 60 * 1000;
+const now = Date.now();
+
+function daysAgo(days: number): Date {
+  return new Date(now - days * DAY_MS);
+}
+
+function daysFromNow(days: number): Date {
+  return new Date(now + days * DAY_MS);
+}
+
+function dateOnly(value: Date): Date {
+  return new Date(`${value.toISOString().slice(0, 10)}T00:00:00.000Z`);
+}
+
+async function main() {
+  if (usingFallbackPassword) {
+    console.warn('DEMO_PASSWORD is not set; using the local development default. Do not use this seed in production.');
+  }
+
+  await prisma.medicationDose.deleteMany();
   await prisma.medication.deleteMany();
+  await prisma.reminder.deleteMany();
+  await prisma.agentActivity.deleteMany();
   await prisma.appointment.deleteMany();
   await prisma.medicalRecord.deleteMany();
+  await prisma.accessGrant.deleteMany();
+  await prisma.emergencyProfile.deleteMany();
+  await prisma.auditLog.deleteMany();
+  await prisma.notification.deleteMany();
+  await prisma.userPreference.deleteMany();
   await prisma.user.deleteMany();
   await prisma.provider.deleteMany();
   await prisma.patient.deleteMany();
   await prisma.facility.deleteMany();
 
-  // Create facilities
-  console.log('Creating facilities...');
-  const facilityData = [
-    {
-      name: 'Metropolitan Hospital',
-      facilityType: 'Hospital',
-      address: '123 Main St, New York, NY 10001',
-      contactNumber: '(212) 555-1234',
-      email: 'admin@metrohospital.com',
-    },
-    {
-      name: 'Sunshine Clinic',
-      facilityType: 'Clinic',
-      address: '456 Oak Ave, Los Angeles, CA 90001',
-      contactNumber: '(213) 555-5678',
-      email: 'info@sunshineclinic.com',
-    },
-    {
-      name: 'Central Pharmacy',
-      facilityType: 'Pharmacy',
-      address: '789 Elm St, Chicago, IL 60601',
-      contactNumber: '(312) 555-9999',
-      email: 'pharmacy@central.com',
-    },
-    {
-      name: 'Diagnostic Lab Center',
-      facilityType: 'Lab',
-      address: '321 Maple Dr, Boston, MA 02101',
-      contactNumber: '(617) 555-4321',
-      email: 'labs@diagcenter.com',
-    },
-    {
-      name: 'Cardiology Specialists',
-      facilityType: 'Clinic',
-      address: '654 Pine Rd, Houston, TX 77001',
-      contactNumber: '(713) 555-8765',
-      email: 'info@cardiospecialists.com',
-    },
-    {
-      name: 'Westside Medical Center',
-      facilityType: 'Hospital',
-      address: '987 Birch Ln, Seattle, WA 98101',
-      contactNumber: '(206) 555-1111',
-      email: 'admin@westsidemedical.com',
-    },
-    {
-      name: 'Urgent Care Plus',
-      facilityType: 'Clinic',
-      address: '159 Cedar Way, Denver, CO 80201',
-      contactNumber: '(303) 555-2222',
-      email: 'info@urgentcareplus.com',
-    },
-    {
-      name: 'Health Analytics Lab',
-      facilityType: 'Lab',
-      address: '753 Spruce St, Miami, FL 33101',
-      contactNumber: '(305) 555-3333',
-      email: 'labs@healthanalytics.com',
-    },
-    {
-      name: 'North Star Pharmacy',
-      facilityType: 'Pharmacy',
-      address: '852 Willow Ave, Minneapolis, MN 55401',
-      contactNumber: '(612) 555-4444',
-      email: 'rx@northstarpharmacy.com',
-    },
-    {
-      name: 'Family Medicine Clinic',
-      facilityType: 'Clinic',
-      address: '456 Walnut St, Austin, TX 78701',
-      contactNumber: '(512) 555-5555',
-      email: 'contact@familymedicineclinic.com',
-    },
-  ];
+  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 12);
 
+  // -------------------------------------------------------------------------
+  // Facilities
+  // -------------------------------------------------------------------------
   const facilities = await Promise.all(
-    facilityData.map((f) =>
-      prisma.facility.create({
-        data: f,
-      })
-    )
+    [
+      {
+        name: 'Metropolitan General Hospital',
+        facilityType: 'Hospital',
+        address: '123 Main Street, New York, NY 10001',
+        contactNumber: '+1 212 555 0100',
+        email: 'contact@metropolitan-general.example',
+      },
+      {
+        name: 'Sunshine Family Clinic',
+        facilityType: 'Clinic',
+        address: '456 Oak Avenue, Los Angeles, CA 90001',
+        contactNumber: '+1 213 555 0140',
+        email: 'hello@sunshine-clinic.example',
+      },
+      {
+        name: 'Northside Cardiology Centre',
+        facilityType: 'Clinic',
+        address: '654 Pine Road, Houston, TX 77001',
+        contactNumber: '+1 713 555 0188',
+        email: 'reception@northside-cardiology.example',
+      },
+      {
+        name: 'Central Diagnostics Laboratory',
+        facilityType: 'Laboratory',
+        address: '321 Maple Drive, Boston, MA 02101',
+        contactNumber: '+1 617 555 0122',
+        email: 'labs@central-diagnostics.example',
+      },
+      {
+        name: 'Riverside Urgent Care',
+        facilityType: 'Urgent Care',
+        address: '159 Cedar Way, Denver, CO 80201',
+        contactNumber: '+1 303 555 0199',
+        email: 'desk@riverside-urgent.example',
+      },
+      {
+        name: 'Westside Pulmonary Institute',
+        facilityType: 'Clinic',
+        address: '987 Birch Lane, Seattle, WA 98101',
+        contactNumber: '+1 206 555 0177',
+        email: 'team@westside-pulmonary.example',
+      },
+    ].map((data) => prisma.facility.create({ data }))
   );
 
-  console.log(`✓ Created ${facilities.length} facilities`);
+  const [metro, sunshine, cardiology, diagnostics, urgent, pulmonary] = facilities;
 
-  // Create providers
-  console.log('Creating providers...');
-  const providerData = [
+  // -------------------------------------------------------------------------
+  // Providers
+  // -------------------------------------------------------------------------
+  const providers = await Promise.all(
+    [
+      {
+        firstName: 'John',
+        lastName: 'Smith',
+        specialty: 'General Practitioner',
+        licenseNumber: 'MD-1001',
+        contactNumber: '+1 212 555 1001',
+        email: 'john.smith@mediflow.dev',
+        facilityId: metro.id,
+      },
+      {
+        firstName: 'Sarah',
+        lastName: 'Johnson',
+        specialty: 'Cardiologist',
+        licenseNumber: 'MD-1002',
+        contactNumber: '+1 713 555 1002',
+        email: 'sarah.johnson@mediflow.dev',
+        facilityId: cardiology.id,
+      },
+      {
+        firstName: 'Michael',
+        lastName: 'Chen',
+        specialty: 'Endocrinologist',
+        licenseNumber: 'MD-1003',
+        contactNumber: '+1 213 555 1003',
+        email: 'michael.chen@mediflow.dev',
+        facilityId: sunshine.id,
+      },
+      {
+        firstName: 'Emily',
+        lastName: 'Williams',
+        specialty: 'Pulmonologist',
+        licenseNumber: 'MD-1004',
+        contactNumber: '+1 206 555 1004',
+        email: 'emily.williams@mediflow.dev',
+        facilityId: pulmonary.id,
+      },
+      {
+        firstName: 'Priya',
+        lastName: 'Nair',
+        specialty: 'Emergency Physician',
+        licenseNumber: 'MD-1005',
+        contactNumber: '+1 303 555 1005',
+        email: 'priya.nair@mediflow.dev',
+        facilityId: urgent.id,
+      },
+      {
+        firstName: 'Daniel',
+        lastName: 'Okafor',
+        specialty: 'Internal Medicine',
+        licenseNumber: 'MD-1006',
+        contactNumber: '+1 212 555 1006',
+        email: 'daniel.okafor@mediflow.dev',
+        facilityId: metro.id,
+      },
+    ].map((data) => prisma.provider.create({ data }))
+  );
+
+  const [drSmith, drJohnson, drChen, drWilliams, drNair, drOkafor] = providers;
+
+  // -------------------------------------------------------------------------
+  // Patients + users
+  // -------------------------------------------------------------------------
+  const patientSeeds = [
     {
-      firstName: 'John',
-      lastName: 'Smith',
-      specialty: 'General Practitioner',
-      licenseNumber: 'MD001',
-      email: 'j.smith@metrohospital.com',
-      contactNumber: '(212) 555-1001',
-      facilityId: facilities[0].id,
+      firstName: 'Robert',
+      lastName: 'Anderson',
+      dateOfBirth: new Date('1965-03-15'),
+      gender: 'MALE' as const,
+      email: 'robert.anderson@mediflow.dev',
+      contactNumber: '+1 555 010 1001',
+      address: '12 Hudson Street, New York, NY 10013',
+      emergencyContact: 'Alice Anderson (spouse) +1 555 010 2001',
     },
     {
-      firstName: 'Sarah',
-      lastName: 'Johnson',
-      specialty: 'Cardiologist',
-      licenseNumber: 'MD002',
-      email: 's.johnson@cardiospecialists.com',
-      contactNumber: '(713) 555-1002',
-      facilityId: facilities[4].id,
-    },
-    {
-      firstName: 'Michael',
-      lastName: 'Chen',
-      specialty: 'Endocrinologist',
-      licenseNumber: 'MD003',
-      email: 'm.chen@sunshineclinic.com',
-      contactNumber: '(213) 555-1003',
-      facilityId: facilities[1].id,
-    },
-    {
-      firstName: 'Emily',
-      lastName: 'Williams',
-      specialty: 'Nurse Practitioner',
-      licenseNumber: 'NP001',
-      email: 'e.williams@urgentcareplus.com',
-      contactNumber: '(303) 555-1004',
-      facilityId: facilities[6].id,
-    },
-    {
-      firstName: 'David',
+      firstName: 'Jennifer',
       lastName: 'Martinez',
-      specialty: 'Pharmacist',
-      licenseNumber: 'PH001',
-      email: 'd.martinez@centralpharmacy.com',
-      contactNumber: '(312) 555-1005',
-      facilityId: facilities[2].id,
+      dateOfBirth: new Date('1978-07-22'),
+      gender: 'FEMALE' as const,
+      email: 'jennifer.martinez@mediflow.dev',
+      contactNumber: '+1 555 010 1002',
+      address: '88 Sunset Boulevard, Los Angeles, CA 90028',
+      emergencyContact: 'Carlos Martinez (brother) +1 555 010 2002',
+    },
+    {
+      firstName: 'Marcus',
+      lastName: 'Johnson',
+      dateOfBirth: new Date('1972-09-12'),
+      gender: 'MALE' as const,
+      email: 'marcus.johnson@mediflow.dev',
+      contactNumber: '+1 555 010 1003',
+      address: '410 Rainier Avenue, Seattle, WA 98104',
+      emergencyContact: 'Diana Johnson (spouse) +1 555 010 2003',
     },
   ];
 
-  const providers = await Promise.all(
-    providerData.map((p) =>
-      prisma.provider.create({
-        data: p,
-      })
-    )
-  );
-
-  console.log(`✓ Created ${providers.length} providers`);
-
-  // Hash password
-  const hashedPassword = bcrypt.hashSync('demo123', 10);
-
-  // Create 5 patients with detailed medical records
-  console.log('Creating patients...');
-
-  const patients = await Promise.all([
-    // Patient 1: Robert Anderson
-    prisma.patient.create({
+  const patients = [];
+  for (const seed of patientSeeds) {
+    const patient = await prisma.patient.create({ data: seed });
+    await prisma.user.create({
       data: {
-        firstName: 'Robert',
-        lastName: 'Anderson',
-        email: 'robert.anderson@email.com',
-        dateOfBirth: new Date('1965-03-15'),
-        gender: 'Male',
-        contactNumber: '(555) 001-1001',
-        address: '123 Main St, New York, NY 10001',
-        emergencyContact: 'Alice Anderson (Wife)',
+        email: seed.email,
+        password: passwordHash,
+        name: `${seed.firstName} ${seed.lastName}`,
+        role: 'PATIENT',
+        patientId: patient.id,
       },
-    }),
-    // Patient 2: Jennifer Martinez
-    prisma.patient.create({
-      data: {
-        firstName: 'Jennifer',
-        lastName: 'Martinez',
-        email: 'jennifer.martinez@email.com',
-        dateOfBirth: new Date('1978-07-22'),
-        gender: 'Female',
-        contactNumber: '(555) 002-2002',
-        address: '456 Oak Ave, Los Angeles, CA 90001',
-        emergencyContact: 'Carlos Martinez (Brother)',
-      },
-    }),
-    // Patient 3: David Thompson
-    prisma.patient.create({
-      data: {
-        firstName: 'David',
-        lastName: 'Thompson',
-        email: 'david.thompson@email.com',
-        dateOfBirth: new Date('1955-11-08'),
-        gender: 'Male',
-        contactNumber: '(555) 003-3003',
-        address: '789 Elm St, Chicago, IL 60601',
-        emergencyContact: 'Mary Thompson (Daughter)',
-      },
-    }),
-    // Patient 4: Lisa Chen
-    prisma.patient.create({
-      data: {
-        firstName: 'Lisa',
-        lastName: 'Chen',
-        email: 'lisa.chen@email.com',
-        dateOfBirth: new Date('1982-05-30'),
-        gender: 'Female',
-        contactNumber: '(555) 004-4004',
-        address: '321 Maple Dr, Boston, MA 02101',
-        emergencyContact: 'Wei Chen (Brother)',
-      },
-    }),
-    // Patient 5: Marcus Johnson
-    prisma.patient.create({
-      data: {
-        firstName: 'Marcus',
-        lastName: 'Johnson',
-        email: 'marcus.johnson@email.com',
-        dateOfBirth: new Date('1972-09-12'),
-        gender: 'Male',
-        contactNumber: '(555) 005-5005',
-        address: '654 Pine Rd, Houston, TX 77001',
-        emergencyContact: 'Diana Johnson (Wife)',
-      },
-    }),
-  ]);
+    });
+    await prisma.userPreference.create({
+      data: { userId: (await prisma.user.findUniqueOrThrow({ where: { email: seed.email } })).id },
+    });
+    patients.push(patient);
+  }
 
-  console.log(`✓ Created ${patients.length} patients`);
-
-  // Create user accounts for patients
-  console.log('Creating patient user accounts...');
-  await Promise.all(
-    patients.map((p, i) =>
-      prisma.user.create({
-        data: {
-          email: p.email,
-          password: hashedPassword,
-          name: `${p.firstName} ${p.lastName}`,
-          role: 'PATIENT',
-          patientId: p.id,
-        },
-      })
-    )
-  );
-
-  // Create user accounts for providers
-  console.log('Creating provider user accounts...');
-  await Promise.all(
-    providers.map((p, i) =>
-      prisma.user.create({
-        data: {
-          email: p.email,
-          password: hashedPassword,
-          name: `${p.firstName} ${p.lastName}`,
-          role: 'DOCTOR',
-          providerId: p.id,
-        },
-      })
-    )
-  );
-
-  console.log('Creating medical records and medications...');
-
-  // Medical records for Patient 1 (Robert Anderson - 58, Type 2 Diabetes + Hypertension)
-  const robertRecords = await Promise.all([
-    prisma.medicalRecord.create({
+  for (const provider of providers) {
+    await prisma.user.create({
       data: {
-        patientId: patients[0].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-        description: 'Diabetes and hypertension management prescription',
-        fileName: 'prescription_2024_01.pdf',
+        email: provider.email,
+        password: passwordHash,
+        name: `${provider.firstName} ${provider.lastName}`,
+        role: 'DOCTOR',
+        providerId: provider.id,
       },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[0].id,
-        providerId: providers[1].id,
-        facilityId: facilities[4].id,
-        recordType: 'Lab Report',
-        recordDate: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
-        description: 'HbA1c: 7.2%, Glucose: 145 mg/dL, Creatinine: 1.1 mg/dL',
-        fileName: 'lab_report_2024_01.pdf',
-      },
-    }),
-    // DUPLICATE: Same medication twice (simulating duplicate record)
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[0].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000),
-        description: 'Previous diabetes prescription (duplicate entry)',
-        fileName: 'prescription_2023_12.pdf',
-      },
-    }),
-    // MISSED FOLLOW-UP: Old appointment with no subsequent records
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[0].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        recordType: 'Note',
-        recordDate: new Date(Date.now() - 300 * 24 * 60 * 60 * 1000),
-        description: 'Last visit 10 months ago - follow-up recommended',
-        fileName: 'note_2023_05.pdf',
-      },
-    }),
-  ]);
+    });
+  }
 
-  // Medications for Robert
-  await Promise.all([
-    // Active medications
-    prisma.medication.create({
-      data: {
-        patientId: patients[0].id,
-        recordId: robertRecords[0].id,
+  await prisma.user.create({
+    data: {
+      email: 'admin@mediflow.dev',
+      password: passwordHash,
+      name: 'MediFlow Administrator',
+      role: 'ADMIN',
+    },
+  });
+
+  const [robert, jennifer, marcus] = patients;
+
+  // Robert explicitly shares read access with Dr. Smith, beyond the link created
+  // by records and appointments.
+  await prisma.accessGrant.create({
+    data: {
+      patientId: robert.id,
+      providerId: drSmith.id,
+      scope: 'READ',
+      expiresAt: daysFromNow(365),
+    },
+  });
+
+  // -------------------------------------------------------------------------
+  // Medical records + medications
+  // -------------------------------------------------------------------------
+  const robertPrescription = await prisma.medicalRecord.create({
+    data: {
+      patientId: robert.id,
+      providerId: drSmith.id,
+      facilityId: metro.id,
+      recordType: 'PRESCRIPTION',
+      recordDate: daysAgo(30),
+      description: 'Diabetes and blood-pressure review. Continue current medicines.',
+      fileName: 'robert-prescription.pdf',
+      extractedData: {
+        patientName: 'Robert Anderson',
+        providerName: 'John Smith',
+        facilityName: 'Metropolitan General Hospital',
+        allergies: ['Penicillin'],
+        diagnoses: ['Type 2 diabetes', 'Essential hypertension'],
+        notes: ['HbA1c discussed.', 'Continue lifestyle measures.'],
+        confidence: { medications: 0.9, allergies: 0.85, diagnoses: 0.9, encounters: 0.8, notes: 0.8, overall: 0.85 },
+      },
+    },
+  });
+
+  await prisma.medication.createMany({
+    data: [
+      {
+        patientId: robert.id,
+        recordId: robertPrescription.id,
         name: 'Metformin',
-        dosage: '500mg',
-        frequency: 'Twice daily',
-        startDate: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
-        indication: 'Type 2 Diabetes',
+        dosage: '500 mg',
+        frequency: 'Twice daily with meals',
+        indication: 'Type 2 diabetes',
         prescribedBy: 'Dr. John Smith',
+        startDate: daysAgo(365),
       },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[0].id,
-        recordId: robertRecords[0].id,
+      {
+        patientId: robert.id,
+        recordId: robertPrescription.id,
         name: 'Lisinopril',
-        dosage: '10mg',
+        dosage: '10 mg',
         frequency: 'Once daily',
-        startDate: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000),
         indication: 'Hypertension',
-        prescribedBy: 'Dr. Sarah Johnson',
+        prescribedBy: 'Dr. John Smith',
+        startDate: daysAgo(200),
       },
-    }),
-    // DUPLICATE: Metformin from old record
-    prisma.medication.create({
-      data: {
-        patientId: patients[0].id,
-        recordId: robertRecords[2].id,
+    ],
+  });
+
+  const robertLabs = await prisma.medicalRecord.create({
+    data: {
+      patientId: robert.id,
+      providerId: drChen.id,
+      facilityId: diagnostics.id,
+      recordType: 'LAB_REPORT',
+      recordDate: daysAgo(20),
+      description: 'HbA1c 7.2 percent; fasting glucose 145 mg/dL; creatinine 1.1 mg/dL.',
+      fileName: 'robert-labs.pdf',
+      extractedData: {
+        allergies: [],
+        diagnoses: ['Type 2 diabetes'],
+        notes: ['HbA1c above target.', 'Renal function within recorded reference range.'],
+        vitalSigns: { bloodPressure: '132/84', heartRate: '72', temperature: null, respiratoryRate: null },
+        confidence: { medications: 0.6, allergies: 0.5, diagnoses: 0.85, encounters: 0.8, notes: 0.85, overall: 0.72 },
+      },
+    },
+  });
+
+  const robertOldPrescription = await prisma.medicalRecord.create({
+    data: {
+      patientId: robert.id,
+      providerId: drSmith.id,
+      facilityId: metro.id,
+      recordType: 'PRESCRIPTION',
+      recordDate: daysAgo(95),
+      description: 'Earlier diabetes prescription. Metformin continued at the same dose.',
+      fileName: 'robert-old-prescription.pdf',
+      extractedData: {
+        allergies: ['Penicillin'],
+        diagnoses: ['Type 2 diabetes'],
+        notes: ['Previous course.'],
+      },
+    },
+  });
+
+  await prisma.medication.createMany({
+    data: [
+      {
+        patientId: robert.id,
+        recordId: robertOldPrescription.id,
         name: 'Metformin',
-        dosage: '500mg',
-        frequency: 'Twice daily',
-        startDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
-        endDate: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000),
-        indication: 'Type 2 Diabetes',
+        dosage: '500 mg',
+        frequency: 'Twice daily with meals',
+        indication: 'Type 2 diabetes',
         prescribedBy: 'Dr. John Smith',
+        startDate: daysAgo(95),
+        endDate: daysAgo(60),
       },
-    }),
-    // CONFLICT: NSAIDs with ACE inhibitor
-    prisma.medication.create({
-      data: {
-        patientId: patients[0].id,
-        recordId: robertRecords[1].id,
+      {
+        patientId: robert.id,
+        recordId: robertOldPrescription.id,
         name: 'Ibuprofen',
-        dosage: '400mg',
-        frequency: 'As needed',
-        startDate: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
-        indication: 'Pain management',
+        dosage: '400 mg',
+        frequency: 'As needed for pain',
+        indication: 'Knee pain',
         prescribedBy: 'Dr. John Smith',
+        startDate: daysAgo(40),
       },
-    }),
-  ]);
+    ],
+  });
 
-  // Medical records for Patient 2 (Jennifer Martinez)
-  const jenniferRecords = await Promise.all([
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[1].id,
-        providerId: providers[2].id,
-        facilityId: facilities[1].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000),
-        description: 'Thyroid replacement therapy',
-        fileName: 'prescription_jennifer_2024_01.pdf',
+  const jenniferPrescription = await prisma.medicalRecord.create({
+    data: {
+      patientId: jennifer.id,
+      providerId: drChen.id,
+      facilityId: sunshine.id,
+      recordType: 'PRESCRIPTION',
+      recordDate: daysAgo(25),
+      description: 'Thyroid replacement therapy review.',
+      fileName: 'jennifer-prescription.pdf',
+      extractedData: {
+        allergies: [],
+        diagnoses: ['Hypothyroidism'],
+        notes: ['TSH within range on current dose.'],
       },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[1].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        recordType: 'Lab Report',
-        recordDate: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
-        description: 'TSH: 2.1 mIU/L (normal), Glucose: 95 mg/dL',
-        fileName: 'lab_jennifer_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[1].id,
-        providerId: providers[2].id,
-        facilityId: facilities[1].id,
-        recordType: 'Discharge Summary',
-        recordDate: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000),
-        description: 'Thyroid ultrasound: normal, nodule monitoring recommended',
-        fileName: 'discharge_jennifer_2023_10.pdf',
-      },
-    }),
-  ]);
+    },
+  });
 
-  // Medications for Jennifer
-  await Promise.all([
-    prisma.medication.create({
-      data: {
-        patientId: patients[1].id,
-        recordId: jenniferRecords[0].id,
+  await prisma.medication.createMany({
+    data: [
+      {
+        patientId: jennifer.id,
+        recordId: jenniferPrescription.id,
         name: 'Levothyroxine',
-        dosage: '75mcg',
-        frequency: 'Once daily',
-        startDate: new Date(Date.now() - 600 * 24 * 60 * 60 * 1000),
+        dosage: '75 mcg',
+        frequency: 'Once daily before breakfast',
         indication: 'Hypothyroidism',
         prescribedBy: 'Dr. Michael Chen',
+        startDate: daysAgo(600),
       },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[1].id,
-        recordId: jenniferRecords[0].id,
-        name: 'Prenatal Vitamin',
-        dosage: '1 tablet',
-        frequency: 'Once daily',
-        startDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
-        indication: 'Pregnancy support',
-        prescribedBy: 'OB/GYN',
-      },
-    }),
-  ]);
+    ],
+  });
 
-  // Medical records for Patient 3 (David Thompson - 69, post-op)
-  const davidRecords = await Promise.all([
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[2].id,
-        providerId: providers[0].id,
-        facilityId: facilities[5].id,
-        recordType: 'Discharge Summary',
-        recordDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
-        description: 'Appendectomy - successful surgery, patient discharged in good condition',
-        fileName: 'discharge_david_2024_01.pdf',
+  const marcusPrescription = await prisma.medicalRecord.create({
+    data: {
+      patientId: marcus.id,
+      providerId: drWilliams.id,
+      facilityId: pulmonary.id,
+      recordType: 'PRESCRIPTION',
+      recordDate: daysAgo(18),
+      description: 'COPD maintenance and reliever inhalers reviewed.',
+      fileName: 'marcus-prescription.pdf',
+      extractedData: {
+        allergies: ['Dust mites'],
+        diagnoses: ['COPD', 'Asthma'],
+        notes: ['Inhaler technique checked.'],
       },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[2].id,
-        providerId: providers[0].id,
-        facilityId: facilities[5].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
-        description: 'Post-operative antibiotics and pain management',
-        fileName: 'prescription_david_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[2].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        recordType: 'Note',
-        recordDate: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000),
-        description: 'Pre-operative clearance for appendectomy',
-        fileName: 'note_david_2023_08.pdf',
-      },
-    }),
-  ]);
+    },
+  });
 
-  // Medications for David
-  await Promise.all([
-    prisma.medication.create({
-      data: {
-        patientId: patients[2].id,
-        recordId: davidRecords[1].id,
-        name: 'Amoxicillin',
-        dosage: '500mg',
-        frequency: 'Three times daily',
-        startDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
-        endDate: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
-        indication: 'Post-operative infection prevention',
-        prescribedBy: 'Dr. John Smith',
-      },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[2].id,
-        recordId: davidRecords[1].id,
-        name: 'Acetaminophen',
-        dosage: '500mg',
-        frequency: 'Every 6 hours as needed',
-        startDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
-        endDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
-        indication: 'Post-operative pain',
-        prescribedBy: 'Dr. John Smith',
-      },
-    }),
-  ]);
-
-  // Medical records for Patient 4 (Lisa Chen - 42, hypertension management)
-  const lisaRecords = await Promise.all([
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[3].id,
-        providerId: providers[1].id,
-        facilityId: facilities[4].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
-        description: 'Hypertension management - blood pressure control regimen',
-        fileName: 'prescription_lisa_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[3].id,
-        providerId: providers[1].id,
-        facilityId: facilities[4].id,
-        recordType: 'Lab Report',
-        recordDate: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
-        description: 'BP: 128/82 mmHg, Lipid panel: normal, Potassium: 4.2 mEq/L',
-        fileName: 'lab_lisa_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[3].id,
-        providerId: providers[1].id,
-        facilityId: facilities[4].id,
-        recordType: 'Note',
-        recordDate: new Date(Date.now() - 6 * 30 * 24 * 60 * 60 * 1000),
-        description: 'Cardiac risk assessment completed - low risk',
-        fileName: 'note_lisa_2023_07.pdf',
-      },
-    }),
-  ]);
-
-  // Medications for Lisa
-  await Promise.all([
-    prisma.medication.create({
-      data: {
-        patientId: patients[3].id,
-        recordId: lisaRecords[0].id,
-        name: 'Amlodipine',
-        dosage: '5mg',
-        frequency: 'Once daily',
-        startDate: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000),
-        indication: 'Hypertension',
-        prescribedBy: 'Dr. Sarah Johnson',
-      },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[3].id,
-        recordId: lisaRecords[0].id,
-        name: 'Atorvastatin',
-        dosage: '20mg',
-        frequency: 'Once daily at bedtime',
-        startDate: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
-        indication: 'Cholesterol management',
-        prescribedBy: 'Dr. Sarah Johnson',
-      },
-    }),
-  ]);
-
-  // Medical records for Patient 5 (Marcus Johnson - 52, COPD + Asthma)
-  const marcusRecords = await Promise.all([
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[4].id,
-        providerId: providers[3].id,
-        facilityId: facilities[6].id,
-        recordType: 'Prescription',
-        recordDate: new Date(Date.now() - 18 * 24 * 60 * 60 * 1000),
-        description: 'Respiratory management - inhalers and bronchodilators',
-        fileName: 'prescription_marcus_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[4].id,
-        providerId: providers[3].id,
-        facilityId: facilities[6].id,
-        recordType: 'Lab Report',
-        recordDate: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
-        description: 'Pulmonary function tests - FEV1: 65% predicted',
-        fileName: 'lab_marcus_2024_01.pdf',
-      },
-    }),
-    prisma.medicalRecord.create({
-      data: {
-        patientId: patients[4].id,
-        providerId: providers[3].id,
-        facilityId: facilities[6].id,
-        recordType: 'Note',
-        recordDate: new Date(Date.now() - 250 * 24 * 60 * 60 * 1000),
-        description: 'Exacerbation episode - admitted for 3 days',
-        fileName: 'note_marcus_2023_06.pdf',
-      },
-    }),
-  ]);
-
-  // Medications for Marcus
-  await Promise.all([
-    prisma.medication.create({
-      data: {
-        patientId: patients[4].id,
-        recordId: marcusRecords[0].id,
+  await prisma.medication.createMany({
+    data: [
+      {
+        patientId: marcus.id,
+        recordId: marcusPrescription.id,
         name: 'Albuterol',
-        dosage: 'Inhaler',
-        frequency: 'As needed (2 puffs)',
-        startDate: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000),
-        indication: 'Asthma/COPD acute relief',
+        dosage: '100 mcg inhaler',
+        frequency: 'Two puffs as needed',
+        indication: 'Asthma and COPD relief',
         prescribedBy: 'Dr. Emily Williams',
+        startDate: daysAgo(365),
       },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[4].id,
-        recordId: marcusRecords[0].id,
+      {
+        patientId: marcus.id,
+        recordId: marcusPrescription.id,
         name: 'Fluticasone/Salmeterol',
-        dosage: 'Inhaler (45/21 mcg)',
-        frequency: 'Twice daily',
-        startDate: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000),
+        dosage: '45/21 mcg inhaler',
+        frequency: 'One puff twice daily',
         indication: 'COPD maintenance',
         prescribedBy: 'Dr. Emily Williams',
+        startDate: daysAgo(200),
+        refillDueDate: daysFromNow(10),
       },
-    }),
-    prisma.medication.create({
-      data: {
-        patientId: patients[4].id,
-        recordId: marcusRecords[0].id,
-        name: 'Prednisone',
-        dosage: '20mg',
-        frequency: 'Once daily',
-        startDate: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
-        endDate: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
-        indication: 'Recent exacerbation management',
-        prescribedBy: 'Dr. Emily Williams',
-      },
-    }),
-  ]);
+    ],
+  });
 
-  console.log('Creating appointments...');
-
-  // Create appointments
-  await Promise.all([
-    prisma.appointment.create({
-      data: {
-        patientId: patients[0].id,
-        providerId: providers[0].id,
-        facilityId: facilities[0].id,
-        appointmentDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        appointmentTime: '10:00 AM',
-        status: 'Scheduled',
-        reason: 'Diabetes management follow-up',
+  await prisma.medicalRecord.create({
+    data: {
+      patientId: marcus.id,
+      providerId: drWilliams.id,
+      facilityId: pulmonary.id,
+      recordType: 'LAB_REPORT',
+      recordDate: daysAgo(8),
+      description: 'Spirometry: FEV1 65 percent of predicted.',
+      fileName: 'marcus-spirometry.pdf',
+      extractedData: {
+        allergies: [],
+        diagnoses: ['COPD'],
+        notes: ['FEV1 reduced compared with predicted values.'],
+        confidence: { medications: 0.5, allergies: 0.5, diagnoses: 0.8, encounters: 0.7, notes: 0.85, overall: 0.67 },
       },
-    }),
-    prisma.appointment.create({
-      data: {
-        patientId: patients[1].id,
-        providerId: providers[2].id,
-        facilityId: facilities[1].id,
-        appointmentDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-        appointmentTime: '2:00 PM',
-        status: 'Scheduled',
+    },
+  });
+
+  // A deliberately old record so the timeline shows an ongoing care gap.
+  await prisma.medicalRecord.create({
+    data: {
+      patientId: jennifer.id,
+      providerId: drChen.id,
+      facilityId: sunshine.id,
+      recordType: 'ENCOUNTER',
+      recordDate: daysAgo(420),
+      description: 'Initial thyroid assessment. Follow-up recommended in six months.',
+      fileName: 'jennifer-initial-note.pdf',
+      extractedData: { allergies: [], diagnoses: ['Hypothyroidism'], notes: ['Baseline visit.'] },
+    },
+  });
+
+  await prisma.emergencyProfile.create({
+    data: {
+      patientId: robert.id,
+      bloodGroup: 'O+',
+      allergies: ['Penicillin'],
+      conditions: ['Type 2 diabetes', 'Essential hypertension'],
+      contacts: [{ name: 'Alice Anderson', relation: 'Spouse', phone: '+1 555 010 2001' }],
+      organDonor: true,
+    },
+  });
+
+  // -------------------------------------------------------------------------
+  // Appointments
+  // -------------------------------------------------------------------------
+  await prisma.appointment.createMany({
+    data: [
+      {
+        patientId: robert.id,
+        providerId: drSmith.id,
+        facilityId: metro.id,
+        appointmentDate: dateOnly(daysFromNow(7)),
+        appointmentTime: '10:00',
+        status: 'SCHEDULED',
+        reason: 'Diabetes and blood-pressure follow-up',
+        urgency: 'MEDIUM',
+      },
+      {
+        patientId: robert.id,
+        providerId: drJohnson.id,
+        facilityId: cardiology.id,
+        appointmentDate: dateOnly(daysAgo(14)),
+        appointmentTime: '14:30',
+        status: 'COMPLETED',
+        reason: 'Cardiology review',
+        urgency: 'LOW',
+        notes: 'Blood pressure acceptable. Continue current plan.',
+      },
+      {
+        patientId: robert.id,
+        providerId: drSmith.id,
+        facilityId: metro.id,
+        appointmentDate: dateOnly(daysAgo(45)),
+        appointmentTime: '09:30',
+        status: 'NOSHOW',
+        reason: 'Medication review',
+        urgency: 'MEDIUM',
+      },
+      {
+        patientId: jennifer.id,
+        providerId: drChen.id,
+        facilityId: sunshine.id,
+        appointmentDate: dateOnly(daysFromNow(14)),
+        appointmentTime: '11:00',
+        status: 'SCHEDULED',
         reason: 'Thyroid check-up',
+        urgency: 'LOW',
       },
-    }),
-    prisma.appointment.create({
-      data: {
-        patientId: patients[2].id,
-        providerId: providers[0].id,
-        facilityId: facilities[5].id,
-        appointmentDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        appointmentTime: '11:00 AM',
-        status: 'Scheduled',
-        reason: 'Post-operative wound check',
+      {
+        patientId: jennifer.id,
+        providerId: drChen.id,
+        facilityId: sunshine.id,
+        appointmentDate: dateOnly(daysAgo(60)),
+        appointmentTime: '16:00',
+        status: 'CANCELLED',
+        reason: 'Routine review',
+        urgency: 'LOW',
+        cancelledAt: daysAgo(61),
       },
-    }),
-    prisma.appointment.create({
-      data: {
-        patientId: patients[3].id,
-        providerId: providers[1].id,
-        facilityId: facilities[4].id,
-        appointmentDate: new Date(Date.now() + 21 * 24 * 60 * 60 * 1000),
-        appointmentTime: '3:00 PM',
-        status: 'Scheduled',
-        reason: 'Cardiology follow-up',
+      {
+        patientId: marcus.id,
+        providerId: drWilliams.id,
+        facilityId: pulmonary.id,
+        appointmentDate: dateOnly(daysFromNow(5)),
+        appointmentTime: '09:00',
+        status: 'SCHEDULED',
+        reason: 'Pulmonary function review',
+        urgency: 'MEDIUM',
       },
-    }),
-    prisma.appointment.create({
-      data: {
-        patientId: patients[4].id,
-        providerId: providers[3].id,
-        facilityId: facilities[6].id,
-        appointmentDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
-        appointmentTime: '9:00 AM',
-        status: 'Scheduled',
-        reason: 'Pulmonary follow-up',
+      {
+        patientId: marcus.id,
+        providerId: drNair.id,
+        facilityId: urgent.id,
+        appointmentDate: dateOnly(daysAgo(90)),
+        appointmentTime: '10:30',
+        status: 'COMPLETED',
+        reason: 'Urgent breathing assessment',
+        urgency: 'HIGH',
       },
-    }),
-  ]);
+    ],
+  });
 
-  console.log('Creating reminders...');
-
-  // Create reminders
-  await Promise.all([
-    prisma.reminder.create({
-      data: {
-        patientId: patients[0].id,
-        reminderType: 'Medication',
+  // -------------------------------------------------------------------------
+  // Reminders
+  // -------------------------------------------------------------------------
+  await prisma.reminder.createMany({
+    data: [
+      {
+        patientId: robert.id,
+        reminderType: 'MEDICATION',
         title: 'Take Metformin',
-        description: 'Remember to take your Metformin 500mg twice daily with meals',
-        dueDate: new Date(),
-        status: 'Pending',
+        description: '500 mg twice daily with meals.',
+        dueDate: new Date(`${new Date().toISOString().slice(0, 10)}T08:00:00.000Z`),
+        status: 'PENDING',
       },
-    }),
-    prisma.reminder.create({
-      data: {
-        patientId: patients[0].id,
-        reminderType: 'FollowUp',
-        title: 'Schedule 6-month follow-up',
-        description: 'It has been 10 months since your last comprehensive check-up',
-        dueDate: new Date(),
-        status: 'Pending',
+      {
+        patientId: robert.id,
+        reminderType: 'FOLLOW_UP',
+        title: 'Book a blood-pressure review',
+        description: 'The last medication review was not attended. Contact the clinic to rebook.',
+        dueDate: daysAgo(2),
+        status: 'PENDING',
       },
-    }),
-    prisma.reminder.create({
-      data: {
-        patientId: patients[1].id,
-        reminderType: 'Appointment',
-        title: 'Upcoming appointment reminder',
-        description: 'You have an appointment with Dr. Michael Chen in 3 days',
-        dueDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
-        status: 'Pending',
+      {
+        patientId: jennifer.id,
+        reminderType: 'APPOINTMENT',
+        title: 'Thyroid check-up in two weeks',
+        description: 'Bring your current levothyroxine pack and any recent blood tests.',
+        dueDate: daysFromNow(14),
+        status: 'PENDING',
       },
-    }),
-  ]);
+      {
+        patientId: marcus.id,
+        reminderType: 'REFILL',
+        title: 'Refill Fluticasone/Salmeterol',
+        description: 'The recorded supply is due for review. Ask the clinic or pharmacist about a refill.',
+        dueDate: daysFromNow(10),
+        status: 'PENDING',
+      },
+      {
+        patientId: marcus.id,
+        reminderType: 'MEDICATION',
+        title: 'Take Fluticasone/Salmeterol',
+        description: 'One puff twice daily.',
+        dueDate: daysAgo(1),
+        status: 'ACKNOWLEDGED',
+      },
+    ],
+  });
 
-  console.log('\n✅ Database seeding completed successfully!\n');
-  console.log('📋 Demo Accounts Created:');
-  console.log('\nPatient Accounts:');
-  patients.forEach((p, i) => {
-    console.log(`  ${i + 1}. ${p.firstName} ${p.lastName} - ${p.email} (password: demo123)`);
-  });
-  console.log('\nDoctor Accounts:');
-  providers.forEach((p, i) => {
-    console.log(`  ${i + 1}. Dr. ${p.firstName} ${p.lastName} - ${p.email} (password: demo123)`);
-  });
+  // Keep the referenced include results alive for clarity in future edits.
+  void robertPrescription;
+  void robertLabs;
+  void robertOldPrescription;
+  void jenniferPrescription;
+  void marcusPrescription;
+
+  console.log('Seed complete.');
+  console.log(`Facilities: ${facilities.length} | Providers: ${providers.length} | Patients: ${patients.length}`);
+  console.log('Accounts (password from DEMO_PASSWORD):');
+  console.log('  Patient: robert.anderson@mediflow.dev');
+  console.log('  Patient: jennifer.martinez@mediflow.dev');
+  console.log('  Patient: marcus.johnson@mediflow.dev');
+  console.log('  Doctor:  john.smith@mediflow.dev');
+  console.log('  Doctor:  sarah.johnson@mediflow.dev');
+  console.log('  Doctor:  michael.chen@mediflow.dev');
+  console.log('  Admin:   admin@mediflow.dev');
 }
 
 main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
+  .catch((error) => {
+    console.error('Seed failed:', error instanceof Error ? error.message : error);
+    process.exitCode = 1;
   })
   .finally(async () => {
     await prisma.$disconnect();

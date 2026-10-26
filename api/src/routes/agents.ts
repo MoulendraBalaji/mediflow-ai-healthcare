@@ -1,175 +1,144 @@
-import { Router, Request, Response } from 'express';
-import multer from 'multer';
-import { prisma } from '../index.js';
-import { authMiddleware, AuthRequest } from '../middleware/auth.js';
-import { extractMedicalData, validateExtraction, parseUploadedFile } from '../agents/intakeAgent.js';
+import { Router } from 'express';
+import { z } from 'zod';
+import { prisma } from '../lib/prisma.js';
+import { asyncHandler, notFound, ok, parseBody } from '../lib/http.js';
+import { authMiddleware } from '../middleware/auth.js';
+import { assertPatientAccess, requireRole, resolvePatientId } from '../middleware/access.js';
 import { analyzeTimeline } from '../agents/timelineAgent.js';
 import { navigateCare } from '../agents/navigatorAgent.js';
 import { generateReminders } from '../agents/companionAgent.js';
-import { generatePatientInsight, generateHospitalAnalytics } from '../agents/insightAgent.js';
+import { generateHospitalAnalytics, generatePatientInsight } from '../agents/insightAgent.js';
+import { withAgentRun } from '../services/agentRuns.js';
+import { aiStatus } from '../services/groqService.js';
+import { audit } from '../lib/audit.js';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-router.post('/intake/parse', authMiddleware, upload.single('file'), async (req: AuthRequest, res: Response) => {
-  const startTime = Date.now();
-  try {
-    let patientId = req.body.patientId || (req.query.patientId as string);
-    let fileType = req.body.fileType || (req.query.fileType as string);
-    let fileName: string;
-    let fileBuffer: Buffer;
-
-    if (req.file) {
-      fileName = req.file.originalname;
-      fileBuffer = req.file.buffer;
-      fileType = fileType || 'Prescription';
-    } else if (req.body.fileBuffer) {
-      fileName = req.body.fileName;
-      fileBuffer = Buffer.from(req.body.fileBuffer, 'base64');
-    } else {
-      return res.status(400).json({ error: 'No file provided' });
-    }
-
-    if (!patientId || !fileName) {
-      return res.status(400).json({ error: 'Missing required fields: patientId' });
-    }
-
-    const activityId = await createActivityLog(patientId, 'Intake', 'Processing', { fileType, fileName });
-
-    try {
-      const extractedData = await parseUploadedFile(fileBuffer, fileType, fileName);
-      const validation = validateExtraction(extractedData);
-      if (!validation.valid) throw new Error(`Extraction validation failed: ${validation.errors.join(', ')}`);
-
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Completed', extractedData, duration);
-
-      res.json({ success: true, data: extractedData, duration, activityId });
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Failed', null, duration, error.message);
-      throw error;
-    }
-  } catch (error: any) {
-    console.error('Intake agent error:', error);
-    res.status(400).json({ error: 'Parsing failed', message: error.message });
-  }
+const patientBodySchema = z.object({
+  patientId: z.string().trim().optional(),
 });
 
-router.post('/timeline/analyze', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const startTime = Date.now();
-  try {
-    const { patientId } = req.body;
-    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
-
-    const activityId = await createActivityLog(patientId, 'Timeline', 'Processing', { patientId });
-
-    try {
-      const analysis = await analyzeTimeline(patientId);
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Completed', analysis, duration);
-      res.json({ success: true, data: analysis, duration });
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Failed', null, duration, error.message);
-      throw error;
-    }
-  } catch (error: any) {
-    console.error('Timeline agent error:', error);
-    res.status(400).json({ error: 'Analysis failed', message: error.message });
-  }
+const navigatorSchema = z.object({
+  patientId: z.string().trim().optional(),
+  symptoms: z.array(z.string().trim().min(1).max(200)).min(1, 'Describe at least one symptom').max(10),
+  currentConditions: z.array(z.string().trim().max(160)).max(10).default([]),
 });
 
-router.post('/navigator/recommend', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const startTime = Date.now();
-  try {
-    const { patientId, symptoms, currentConditions } = req.body;
-    if (!patientId || !symptoms) return res.status(400).json({ error: 'patientId and symptoms are required' });
+/** GET /api/agents/status */
+router.get(
+  '/status',
+  authMiddleware,
+  asyncHandler(async (_req, res) => {
+    return ok(res, { ...aiStatus(), generatedAt: new Date().toISOString() });
+  })
+);
 
-    const activityId = await createActivityLog(patientId, 'Navigator', 'Processing', { symptoms, currentConditions });
+/** POST /api/agents/timeline/analyze */
+router.post(
+  '/timeline/analyze',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const body = parseBody(patientBodySchema, req);
+    const patientId = resolvePatientId(req, body.patientId);
+    await assertPatientAccess(req, patientId);
 
-    try {
-      const result = await navigateCare(patientId, symptoms, currentConditions || []);
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Completed', result, duration);
-      res.json({ success: true, data: result, duration });
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Failed', null, duration, error.message);
-      throw error;
-    }
-  } catch (error: any) {
-    res.status(400).json({ error: 'Navigation failed', message: error.message });
-  }
-});
+    const run = await withAgentRun(patientId, 'TIMELINE', { patientId }, () => analyzeTimeline(patientId));
+    return ok(res, run.output, { duration: run.duration, activityId: run.activityId });
+  })
+);
 
-router.post('/companion/generate', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const startTime = Date.now();
-  try {
-    const { patientId } = req.body;
-    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+/** POST /api/agents/navigator/recommend */
+router.post(
+  '/navigator/recommend',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const body = parseBody(navigatorSchema, req);
+    const patientId = resolvePatientId(req, body.patientId);
+    await assertPatientAccess(req, patientId);
 
-    const activityId = await createActivityLog(patientId, 'Companion', 'Processing', { patientId });
+    const run = await withAgentRun(
+      patientId,
+      'NAVIGATOR',
+      { symptoms: body.symptoms, currentConditions: body.currentConditions },
+      () => navigateCare(patientId, body.symptoms, body.currentConditions)
+    );
 
-    try {
-      const result = await generateReminders(patientId);
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Completed', result, duration);
-      res.json({ success: true, data: result, duration });
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Failed', null, duration, error.message);
-      throw error;
-    }
-  } catch (error: any) {
-    res.status(400).json({ error: 'Companion generation failed', message: error.message });
-  }
-});
+    audit(req, 'RUN_NAVIGATOR', 'AGENT', patientId, { urgency: run.output.urgency });
+    return ok(res, run.output, {
+      duration: run.duration,
+      activityId: run.activityId,
+      disclaimer: run.output.disclaimer,
+    });
+  })
+);
 
-router.post('/insight/generate', authMiddleware, async (req: AuthRequest, res: Response) => {
-  const startTime = Date.now();
-  try {
-    const { patientId } = req.body;
-    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+/** POST /api/agents/companion/generate */
+router.post(
+  '/companion/generate',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const body = parseBody(patientBodySchema, req);
+    const patientId = resolvePatientId(req, body.patientId);
+    await assertPatientAccess(req, patientId);
 
-    const activityId = await createActivityLog(patientId, 'Insight', 'Processing', { patientId });
+    const run = await withAgentRun(patientId, 'COMPANION', { patientId }, () =>
+      generateReminders(patientId)
+    );
+    return ok(res, run.output, { duration: run.duration, activityId: run.activityId });
+  })
+);
 
-    try {
-      const result = await generatePatientInsight(patientId);
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Completed', result, duration);
-      res.json({ success: true, data: result, duration });
-    } catch (error: any) {
-      const duration = Date.now() - startTime;
-      await updateActivityLog(activityId, 'Failed', null, duration, error.message);
-      throw error;
-    }
-  } catch (error: any) {
-    res.status(400).json({ error: 'Insight generation failed', message: error.message });
-  }
-});
+/** POST /api/agents/insight/generate */
+router.post(
+  '/insight/generate',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const body = parseBody(patientBodySchema, req);
+    const patientId = resolvePatientId(req, body.patientId);
+    await assertPatientAccess(req, patientId);
 
-router.get('/insight/analytics', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
+    const run = await withAgentRun(patientId, 'INSIGHT', { patientId }, () =>
+      generatePatientInsight(patientId)
+    );
+    return ok(res, run.output, { duration: run.duration, activityId: run.activityId });
+  })
+);
+
+/** GET /api/agents/insights/latest/:patientId */
+router.get(
+  '/insights/latest/:patientId',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const patientId = resolvePatientId(req, req.params.patientId);
+    await assertPatientAccess(req, patientId);
+
+    const activity = await prisma.agentActivity.findFirst({
+      where: { patientId, agentName: 'INSIGHT', status: 'COMPLETED' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, output: true, createdAt: true, duration: true },
+    });
+
+    if (!activity) throw notFound('No insight has been generated yet');
+
+    return ok(res, {
+      insight: activity.output,
+      activityId: activity.id,
+      generatedAt: activity.createdAt.toISOString(),
+      duration: activity.duration,
+    });
+  })
+);
+
+/** GET /api/agents/insight/analytics — hospital-wide aggregates, staff only. */
+router.get(
+  '/insight/analytics',
+  authMiddleware,
+  requireRole('ADMIN', 'DOCTOR'),
+  asyncHandler(async (req, res) => {
     const analytics = await generateHospitalAnalytics();
-    res.json({ success: true, data: analytics });
-  } catch (error: any) {
-    res.status(500).json({ error: 'Analytics generation failed', message: error.message });
-  }
-});
-
-async function createActivityLog(patientId: string, agentName: string, status: string, input: any): Promise<string> {
-  const activity = await prisma.agentActivity.create({
-    data: { patientId, agentName, status, input: JSON.stringify(input) },
-  });
-  return activity.id;
-}
-
-async function updateActivityLog(activityId: string, status: string, output: any, duration: number, error?: string): Promise<void> {
-  await prisma.agentActivity.update({
-    where: { id: activityId },
-    data: { status, output: output ? JSON.stringify(output) : null, duration, error },
-  });
-}
+    audit(req, 'VIEW_ANALYTICS', 'ANALYTICS', null);
+    return ok(res, analytics, { cached: analytics.cached });
+  })
+);
 
 export default router;

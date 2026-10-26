@@ -4,18 +4,25 @@
   "description": "AI Healthcare Navigation & Patient Care Coordination Platform",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"cd api && npm run dev\" \"cd app && npm run dev\"",
+    "dev": "concurrently \"npm run dev --workspace=api\" \"npm run dev --workspace=app\"",
     "build": "npm run build --workspace=api && npm run build --workspace=app",
     "start": "npm start --workspace=app",
-    "db:push": "cd api && npx prisma db push",
-    "db:seed": "cd api && npx prisma db seed",
-    "db:reset": "cd api && npx prisma migrate reset --force",
-    "db:studio": "cd api && npx prisma studio"
+    "typecheck": "npm run typecheck --workspace=api && npm run typecheck --workspace=app",
+    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:push": "prisma db push --schema prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema prisma/schema.prisma",
+    "db:migrate:dev": "prisma migrate dev --schema prisma/schema.prisma",
+    "db:seed": "prisma db seed --schema prisma/schema.prisma",
+    "db:reset": "prisma migrate reset --force --schema prisma/schema.prisma",
+    "db:studio": "prisma studio --schema prisma/schema.prisma"
   },
   "workspaces": [
     "api",
     "app"
   ],
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
     "concurrently": "^8.2.0"
   },

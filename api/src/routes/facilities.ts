@@ -1,106 +1,164 @@
-import { Router, Request, Response } from 'express';
-import { prisma } from '../index.js';
-import { authMiddleware, AuthRequest } from '../middleware/auth.js';
+import { Router } from 'express';
+import { z } from 'zod';
+import { prisma } from '../lib/prisma.js';
+import { asyncHandler, notFound, ok, parseQuery, privateCache } from '../lib/http.js';
+import { authMiddleware } from '../middleware/auth.js';
 
 const router = Router();
 
-router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { type, search, limit = '20' } = req.query;
-
-    const where: any = {};
-    if (type) where.facilityType = type;
-    if (search) {
-      where.OR = [
-        { name: { contains: search as string } },
-        { address: { contains: search as string } },
-      ];
-    }
-
-    const facilities = await prisma.facility.findMany({
-      where,
-      include: { providers: true },
-      take: parseInt(limit as string),
-    });
-
-    res.json({ facilities, total: facilities.length });
-  } catch (error: any) {
-    res.status(500).json({ error: 'Failed to fetch facilities', message: error.message });
-  }
+const listQuerySchema = z.object({
+  type: z.string().trim().max(60).optional(),
+  search: z.string().trim().max(120).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
-router.get('/nearby', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { type, limit = '10' } = req.query;
+function formatFacility(facility: {
+  id: string;
+  name: string;
+  facilityType: string;
+  address: string;
+  contactNumber: string | null;
+  email: string | null;
+  providers: Array<{ id: string; firstName: string; lastName: string; specialty: string }>;
+}) {
+  return {
+    id: facility.id,
+    name: facility.name,
+    type: facility.facilityType,
+    facilityType: facility.facilityType,
+    address: facility.address,
+    contactNumber: facility.contactNumber,
+    email: facility.email,
+    providerCount: facility.providers.length,
+    specialties: [...new Set(facility.providers.map((provider) => provider.specialty))].sort(),
+    providers: facility.providers,
+  };
+}
 
-    const where: any = {};
-    if (type) {
-      const types = (type as string).split(',');
-      where.facilityType = { in: types };
-    }
+/** GET /api/facilities */
+router.get(
+  '/',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const query = parseQuery(listQuerySchema, req);
+    const facilities = await prisma.facility.findMany({
+      where: {
+        ...(query.type ? { facilityType: { equals: query.type, mode: 'insensitive' } } : {}),
+        ...(query.search
+          ? {
+              OR: [
+                { name: { contains: query.search, mode: 'insensitive' } },
+                { address: { contains: query.search, mode: 'insensitive' } },
+                { facilityType: { contains: query.search, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      include: {
+        providers: {
+          select: { id: true, firstName: true, lastName: true, specialty: true },
+          orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        },
+      },
+      orderBy: { name: 'asc' },
+      take: query.limit,
+    });
+
+    privateCache(res, 30);
+    return ok(res, { facilities: facilities.map(formatFacility) }, { total: facilities.length });
+  })
+);
+
+/** GET /api/facilities/nearby — no geolocation is collected, so this ranks by breadth of care. */
+router.get(
+  '/nearby',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const query = parseQuery(
+      z.object({
+        type: z.string().trim().max(60).optional(),
+        limit: z.coerce.number().int().min(1).max(50).default(10),
+      }),
+      req
+    );
+
+    const types = query.type
+      ?.split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
 
     const facilities = await prisma.facility.findMany({
-      where,
+      where: types && types.length > 0 ? { facilityType: { in: types, mode: 'insensitive' } } : {},
+      include: {
+        providers: {
+          select: { id: true, firstName: true, lastName: true, specialty: true },
+        },
+      },
+      take: 100,
+    });
+
+    const formatted = facilities
+      .map(formatFacility)
+      .sort((a, b) => b.providerCount - a.providerCount || a.name.localeCompare(b.name))
+      .slice(0, query.limit);
+
+    privateCache(res, 30);
+    return ok(res, { facilities: formatted }, { total: formatted.length, rankedBy: 'provider-coverage' });
+  })
+);
+
+/** GET /api/facilities/emergency/list */
+router.get(
+  '/emergency/list',
+  authMiddleware,
+  asyncHandler(async (_req, res) => {
+    const facilities = await prisma.facility.findMany({
+      where: {
+        OR: [
+          { facilityType: { equals: 'Hospital', mode: 'insensitive' } },
+          { name: { contains: 'emergency', mode: 'insensitive' } },
+          { name: { contains: 'urgent', mode: 'insensitive' } },
+        ],
+      },
       include: {
         providers: { select: { id: true, firstName: true, lastName: true, specialty: true } },
       },
-      take: parseInt(limit as string),
+      orderBy: { name: 'asc' },
     });
 
-    const formatted = facilities.map(f => ({
-      id: f.id,
-      name: f.name,
-      type: f.facilityType,
-      address: f.address,
-      contactNumber: f.contactNumber,
-      email: f.email,
-      providerCount: f.providers.length,
-      specialties: [...new Set(f.providers.map(p => p.specialty))],
-    }));
+    privateCache(res, 60);
+    return ok(res, { facilities: facilities.map(formatFacility) }, { total: facilities.length });
+  })
+);
 
-    res.json({ facilities: formatted, total: formatted.length });
-  } catch (error: any) {
-    res.status(500).json({ error: 'Failed to fetch nearby facilities', message: error.message });
-  }
-});
-
-router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { id } = req.params;
-
+/** GET /api/facilities/:id */
+router.get(
+  '/:id',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
     const facility = await prisma.facility.findUnique({
-      where: { id },
+      where: { id: req.params.id },
       include: {
-        providers: true,
+        providers: {
+          select: { id: true, firstName: true, lastName: true, specialty: true, contactNumber: true },
+          orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        },
         _count: { select: { medicalRecords: true, appointments: true } },
       },
     });
+    if (!facility) throw notFound('That facility was not found');
 
-    if (!facility) return res.status(404).json({ error: 'Facility not found' });
-
-    res.json(facility);
-  } catch (error: any) {
-    res.status(500).json({ error: 'Failed to fetch facility', message: error.message });
-  }
-});
-
-router.get('/emergency/list', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const emergencyFacilities = await prisma.facility.findMany({
-      where: {
-        OR: [
-          { facilityType: 'Hospital' },
-          { name: { contains: 'Urgent' } },
-          { name: { contains: 'Emergency' } },
-        ],
+    privateCache(res, 30);
+    return ok(res, {
+      facility: {
+        ...formatFacility(facility),
+        counts: {
+          records: facility._count.medicalRecords,
+          appointments: facility._count.appointments,
+        },
       },
-      include: { providers: true },
     });
-
-    res.json({ facilities: emergencyFacilities, total: emergencyFacilities.length });
-  } catch (error: any) {
-    res.status(500).json({ error: 'Failed to fetch emergency facilities', message: error.message });
-  }
-});
+  })
+);
 
 export default router;

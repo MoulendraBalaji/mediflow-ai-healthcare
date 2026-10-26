@@ -1,148 +1,156 @@
-import { Router, Request, Response } from 'express';
-import { prisma } from '../index.js';
-import { authMiddleware, AuthRequest } from '../middleware/auth.js';
+import { Router } from 'express';
+import { AgentName, type Prisma } from '@prisma/client';
+import { z } from 'zod';
+import { prisma } from '../lib/prisma.js';
+import { asyncHandler, notFound, ok, parseQuery } from '../lib/http.js';
+import { authMiddleware } from '../middleware/auth.js';
+import { assertPatientAccess, resolvePatientId } from '../middleware/access.js';
+import { audit } from '../lib/audit.js';
 
 const router = Router();
 
-/**
- * Get agent activity log
- * GET /api/agent-activity?patientId=...&limit=10
- */
-router.get('/', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { patientId, limit = '10', offset = '0' } = req.query;
+const AGENT_LABELS: Record<AgentName, string> = {
+  INTAKE: 'Intake',
+  TIMELINE: 'Timeline',
+  NAVIGATOR: 'Navigator',
+  COMPANION: 'Companion',
+  INSIGHT: 'Insight',
+};
 
-    if (!patientId) {
-      return res.status(400).json({ error: 'patientId is required' });
+const AGENT_DESCRIPTIONS: Record<AgentName, string> = {
+  INTAKE: 'Reads documents and extracts only what is printed',
+  TIMELINE: 'Builds the chronology, gaps and duplicate checks',
+  NAVIGATOR: 'Suggests a care pathway with red-flag triage',
+  COMPANION: 'Turns the care plan into reminders and explanations',
+  INSIGHT: 'Summarises recorded care without adding facts',
+};
+
+function asObject(value: Prisma.JsonValue | null): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function briefOutput(agentName: AgentName, status: string, output: Prisma.JsonValue | null): string {
+  if (status === 'PROCESSING') return 'Still running.';
+  if (status === 'FAILED') return 'This run failed. No clinical result was produced.';
+
+  const data = asObject(output);
+  if (!data) return 'Completed.';
+
+  switch (agentName) {
+    case 'INTAKE': {
+      const medications = Array.isArray(data.medications) ? data.medications.length : 0;
+      const diagnoses = Array.isArray(data.diagnoses) ? data.diagnoses.length : 0;
+      return `Extracted ${medications} medicine(s) and ${diagnoses} diagnosis entry(ies) from the document.`;
     }
-
-    // Check authorization (patient can only see their own activity)
-    if (req.user?.role === 'PATIENT' && req.user?.userId !== patientId) {
-      // For now, be lenient - in production, would check if user is patient
+    case 'TIMELINE': {
+      const stats = asObject(data.statistics as Prisma.JsonValue);
+      const gaps = Number(stats?.gapCount ?? 0);
+      const duplicates = Number(stats?.duplicateCount ?? 0);
+      const conflicts = Number(stats?.conflictCount ?? 0);
+      const issues = gaps + duplicates + conflicts;
+      return issues > 0
+        ? `Found ${issues} item(s) to review across gaps, duplicate courses and possible interactions.`
+        : 'No gaps, duplicate courses or rule-based interactions were found.';
     }
-
-    const activities = await prisma.agentActivity.findMany({
-      where: { patientId: patientId as string },
-      orderBy: { createdAt: 'desc' },
-      take: parseInt(limit as string),
-      skip: parseInt(offset as string),
-    });
-
-    // Format activities for frontend
-    const formattedActivities = activities.map((activity) => ({
-      id: activity.id,
-      agentName: activity.agentName,
-      status: activity.status,
-      duration: activity.duration,
-      createdAt: activity.createdAt,
-      input: activity.input ? JSON.parse(activity.input) : null,
-      output: activity.output ? JSON.parse(activity.output) : null,
-      error: activity.error,
-      // Generate brief output snippet
-      briefOutput: generateBriefOutput(activity),
-    }));
-
-    const total = await prisma.agentActivity.count({
-      where: { patientId: patientId as string },
-    });
-
-    res.json({
-      activities: formattedActivities,
-      total,
-      limit: parseInt(limit as string),
-      offset: parseInt(offset as string),
-    });
-  } catch (error: any) {
-    console.error('Error fetching agent activity:', error);
-    res.status(500).json({ error: 'Failed to fetch activity', message: error.message });
-  }
-});
-
-/**
- * Get single agent activity detail
- * GET /api/agent-activity/:id
- */
-router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { id } = req.params;
-
-    const activity = await prisma.agentActivity.findUnique({
-      where: { id },
-    });
-
-    if (!activity) {
-      return res.status(404).json({ error: 'Activity not found' });
+    case 'NAVIGATOR': {
+      const urgency = typeof data.urgency === 'string' ? data.urgency : 'UNKNOWN';
+      const redFlags = Array.isArray(data.redFlags) ? data.redFlags.length : 0;
+      return redFlags > 0
+        ? `Emergency triage triggered (${urgency}). Warning signs: ${redFlags}.`
+        : `Suggested a care pathway with ${urgency.toLowerCase()} urgency.`;
     }
-
-    res.json({
-      id: activity.id,
-      agentName: activity.agentName,
-      status: activity.status,
-      duration: activity.duration,
-      createdAt: activity.createdAt,
-      input: activity.input ? JSON.parse(activity.input) : null,
-      output: activity.output ? JSON.parse(activity.output) : null,
-      error: activity.error,
-    });
-  } catch (error: any) {
-    console.error('Error fetching activity detail:', error);
-    res.status(500).json({ error: 'Failed to fetch activity', message: error.message });
-  }
-});
-
-/**
- * Generate brief output snippet for display
- */
-function generateBriefOutput(activity: any): string {
-  try {
-    if (activity.status === 'Processing') {
-      return 'Processing...';
+    case 'COMPANION': {
+      const reminders = Array.isArray(data.reminders) ? data.reminders.length : 0;
+      const score = typeof data.careEngagementScore === 'number' ? data.careEngagementScore : null;
+      return `Prepared ${reminders} reminder(s)${score === null ? '' : `; care-engagement score ${score}/100`}.`;
     }
-
-    if (activity.status === 'Failed') {
-      return `❌ Error: ${activity.error || 'Unknown error'}`;
+    case 'INSIGHT': {
+      const risk = typeof data.riskLevel === 'string' ? data.riskLevel : 'UNKNOWN';
+      return `Generated a care insight (${risk.toLowerCase()} risk flag).`;
     }
-
-    if (activity.status === 'Completed') {
-      const output = activity.output ? JSON.parse(activity.output) : null;
-
-      if (!output) {
-        return '✓ Completed';
-      }
-
-      switch (activity.agentName) {
-        case 'Intake':
-          const meds = output.medications ? output.medications.length : 0;
-          const diags = output.diagnoses ? output.diagnoses.length : 0;
-          return `✓ Extracted ${meds} meds, ${diags} diagnoses`;
-
-        case 'Timeline':
-          const gaps = output.statistics?.gapCount || 0;
-          const dupes = output.statistics?.duplicateCount || 0;
-          const conflicts = output.statistics?.conflictCount || 0;
-          const issues = gaps + dupes + conflicts;
-          return issues > 0
-            ? `⚠️ Found ${issues} care coordination issue(s)`
-            : '✓ No issues detected';
-
-        case 'Navigator':
-          return '✓ Care pathway analyzed';
-
-        case 'Companion':
-          return '✓ Reminders generated';
-
-        case 'Insight':
-          return '✓ Insights generated';
-
-        default:
-          return '✓ Completed';
-      }
-    }
-
-    return 'Unknown status';
-  } catch (error) {
-    return 'Error generating snippet';
+    default:
+      return 'Completed.';
   }
 }
+
+function formatActivity(activity: {
+  id: string;
+  agentName: AgentName;
+  status: string;
+  input: Prisma.JsonValue | null;
+  output: Prisma.JsonValue | null;
+  meta: Prisma.JsonValue | null;
+  error: string | null;
+  duration: number | null;
+  createdAt: Date;
+}) {
+  return {
+    id: activity.id,
+    agentName: activity.agentName,
+    label: AGENT_LABELS[activity.agentName],
+    description: AGENT_DESCRIPTIONS[activity.agentName],
+    status: activity.status,
+    duration: activity.duration,
+    createdAt: activity.createdAt.toISOString(),
+    input: activity.input,
+    output: activity.output,
+    meta: activity.meta,
+    // Error text is deliberately not echoed to patients; the status is enough.
+    hasError: Boolean(activity.error),
+    briefOutput: briefOutput(activity.agentName, activity.status, activity.output),
+  };
+}
+
+/** GET /api/agent-activity?patientId=&limit=&offset= */
+router.get(
+  '/',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const query = parseQuery(
+      z.object({
+        patientId: z.string().trim().optional(),
+        limit: z.coerce.number().int().min(1).max(100).default(10),
+        offset: z.coerce.number().int().min(0).default(0),
+      }),
+      req
+    );
+
+    const patientId = resolvePatientId(req, query.patientId);
+    await assertPatientAccess(req, patientId);
+
+    const [activities, total] = await Promise.all([
+      prisma.agentActivity.findMany({
+        where: { patientId },
+        orderBy: { createdAt: 'desc' },
+        take: query.limit,
+        skip: query.offset,
+      }),
+      prisma.agentActivity.count({ where: { patientId } }),
+    ]);
+
+    audit(req, 'VIEW_AGENT_ACTIVITY', 'AGENT_ACTIVITY', patientId, { total });
+    return ok(
+      res,
+      { activities: activities.map(formatActivity) },
+      { total, limit: query.limit, offset: query.offset }
+    );
+  })
+);
+
+/** GET /api/agent-activity/:id */
+router.get(
+  '/:id',
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    const activity = await prisma.agentActivity.findUnique({ where: { id: req.params.id } });
+    if (!activity) throw notFound('That agent run was not found');
+    await assertPatientAccess(req, activity.patientId);
+
+    audit(req, 'VIEW_AGENT_RUN', 'AGENT_ACTIVITY', activity.patientId, { activityId: activity.id });
+    return ok(res, { activity: formatActivity(activity) });
+  })
+);
 
 export default router;

@@ -24,12 +24,16 @@ services:
       dockerfile: Dockerfile
       target: api-production
     restart: unless-stopped
-    ports:
-      - "3001:3001"
+    env_file:
+      - .env
     environment:
       NODE_ENV: production
       PORT: 3001
+      # Compose-internal hostname overrides the localhost value in .env.
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/app_db
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,7 +42,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 40s
     networks:
       - app-network
 
@@ -47,13 +51,15 @@ services:
       context: .
       dockerfile: Dockerfile
       target: app-production
+      args:
+        # Baked into the browser bundle, so it must be reachable from the host.
+        NEXT_PUBLIC_API_URL: http://localhost:3001
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
-      NEXT_PUBLIC_API_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
     depends_on:
       api:
         condition: service_healthy

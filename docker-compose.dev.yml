@@ -24,12 +24,15 @@ services:
       dockerfile: Dockerfile
       target: api-build
     restart: unless-stopped
-    ports:
-      - "3001:3001"
+    env_file:
+      - .env
     environment:
       NODE_ENV: development
       PORT: 3001
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/app_db
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "3001:3001"
     volumes:
       - ./api:/workspace/api
       - ./prisma:/workspace/prisma
@@ -38,7 +41,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: sh -c "cd api && npx prisma migrate dev --name init && npx ts-node-dev --respawn --transpile-only src/index.ts"
+    command: sh -c "cd api && npx prisma migrate deploy --schema ../prisma/schema.prisma && npx prisma db seed --schema ../prisma/schema.prisma && npx tsx watch src/index.ts"
     networks:
       - dev-network
 
@@ -48,12 +51,12 @@ services:
       dockerfile: Dockerfile
       target: app-build
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     environment:
       NODE_ENV: development
       PORT: 3000
       NEXT_PUBLIC_API_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
     volumes:
       - ./app:/workspace/app
       - /workspace/app/node_modules
