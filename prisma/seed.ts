@@ -10,7 +10,12 @@ import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
-const prisma = new PrismaClient();
+const rawUrl = process.env.DATABASE_URL ?? '';
+const dbUrl = rawUrl.includes('db.acppgssxziqbbwyhmjrm.supabase.co')
+  ? rawUrl.replace('db.acppgssxziqbbwyhmjrm.supabase.co', '[2406:da12:1f1:f800:8c2e:3916:9f03:55b9]')
+  : rawUrl;
+
+const prisma = new PrismaClient(dbUrl ? { datasources: { db: { url: dbUrl } } } : undefined);
 
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? 'demo1234';
 const usingFallbackPassword = !process.env.DEMO_PASSWORD;

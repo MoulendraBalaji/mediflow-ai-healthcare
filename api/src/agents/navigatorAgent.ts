@@ -139,7 +139,11 @@ function normaliseSymptom(value: string): string {
   return sanitizeUserText(value, 200).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function detectRedFlags(symptoms: string[], conditions: string[]): string[] {
+/**
+ * Deterministic red-flag screen. Exported so tests can verify that no model or
+ * database dependency is involved in deciding an emergency.
+ */
+export function detectRedFlags(symptoms: string[], conditions: string[]): string[] {
   const corpus = [...symptoms, ...conditions].join(' ').toLowerCase();
   const flags = new Set<string>();
   for (const flag of RED_FLAGS) {

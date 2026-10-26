@@ -63,7 +63,7 @@ app.use(
   })
 );
 
-const skipLimits = () => env.NODE_ENV === 'test';
+const skipLimits = () => env.NODE_ENV !== 'production';
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

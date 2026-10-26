@@ -43,6 +43,9 @@ jobs:
       - name: Typecheck App
         run: npx tsc --noEmit
         working-directory: app
+      - name: Typecheck API tests
+        run: npx tsc --noEmit -p tsconfig.test.json
+        working-directory: api
 
   build-api:
     name: Build API
@@ -107,8 +110,13 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Generate Prisma Client
+        run: npx prisma generate --schema ../prisma/schema.prisma
+        working-directory: api
       - name: Run Prisma Migrations
         run: npx prisma migrate deploy --schema ../prisma/schema.prisma
         working-directory: api
       - name: Run Tests
         run: npm test --workspaces --if-present
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app_db

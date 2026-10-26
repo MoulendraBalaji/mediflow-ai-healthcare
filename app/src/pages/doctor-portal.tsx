@@ -4,6 +4,7 @@ import { useRouter } from 'next/router';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { AppShell } from '../components/AppShell';
+import { AgentActivityLog } from '../components/AgentActivityLog';
 import { MedicationList } from '../components/MedicationList';
 import { Alert, ClinicalDisclaimer, ModeNote } from '../components/ui/Alert';
 import { ButtonLink } from '../components/ui/Button';
@@ -359,7 +360,7 @@ export default function DoctorPortalPage() {
                               {formatAppointment(appointment.appointmentDate, appointment.appointmentTime)}
                             </p>
                             <p className="mt-1 text-sm text-ink">
-                              Dr. {appointment.provider.firstName} {appointment.provider.lastName} ·{' '}
+                              Dr. {appointment.provider?.firstName ?? ''} {appointment.provider?.lastName ?? ''} ·{' '}
                               {appointment.status.toLowerCase()}
                             </p>
                             {appointment.reason ? (
@@ -369,6 +370,16 @@ export default function DoctorPortalPage() {
                         ))}
                       </ol>
                     )}
+                  </div>
+                </div>
+
+                <div className="border border-rule bg-surface p-5">
+                  <SectionHeading
+                    title="Agent activity"
+                    description="AI and rule-based agent runs recorded for this patient."
+                  />
+                  <div className="mt-4">
+                    <AgentActivityLog patientId={summary.patient.id} limit={5} />
                   </div>
                 </div>
 
